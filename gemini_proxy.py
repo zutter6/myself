@@ -3,16 +3,22 @@ import json
 import requests
 import re
 import uvicorn
+import base64
 from datetime import datetime
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 import ijson
+from dotenv import load_dotenv
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request as GoogleAuthRequest
+
+# Load environment variables from .env file
+load_dotenv()
 
 # --- Configuration ---
 CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
@@ -26,12 +32,45 @@ SCOPES = [
 GEMINI_DIR = os.path.dirname(os.path.abspath(__file__))  # Same directory as the script
 CREDENTIAL_FILE = os.path.join(GEMINI_DIR, "oauth_creds.json")
 CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
+GEMINI_PORT = int(os.getenv("GEMINI_PORT", "8888"))  # Default to 8888 if not set
+GEMINI_AUTH_PASSWORD = os.getenv("GEMINI_AUTH_PASSWORD", "123456")  # Default password
 
 # --- Global State ---
 credentials = None
 user_project_id = None
 
 app = FastAPI()
+security = HTTPBasic()
+
+def authenticate_user(request: Request):
+    """Authenticate the user with multiple methods."""
+    # Check for API key in query parameters first (for Gemini client compatibility)
+    api_key = request.query_params.get("key")
+    if api_key and api_key == GEMINI_AUTH_PASSWORD:
+        return "api_key_user"
+    
+    # Check for API key in Authorization header (Bearer token format)
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer ") and auth_header[7:] == GEMINI_AUTH_PASSWORD:
+        return "bearer_user"
+    
+    # Check for HTTP Basic Authentication
+    if auth_header.startswith("Basic "):
+        try:
+            encoded_credentials = auth_header[6:]
+            decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
+            username, password = decoded_credentials.split(':', 1)
+            if password == GEMINI_AUTH_PASSWORD:
+                return username
+        except Exception:
+            pass
+    
+    # If none of the authentication methods work
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid authentication credentials. Use HTTP Basic Auth, Bearer token, or 'key' query parameter.",
+        headers={"WWW-Authenticate": "Basic"},
+    )
 
 # Helper class to adapt a generator of bytes into a file-like object
 # that ijson can read from.
@@ -83,12 +122,21 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"<h1>Authentication failed.</h1><p>Please try again.</p>")
 
 def get_user_project_id(creds):
-    """Gets the user's project ID from cache or by probing the API."""
+    """Gets the user's project ID from environment variable, cache, or by probing the API."""
     global user_project_id
     if user_project_id:
         return user_project_id
 
-    # First, try to load project ID from credential file
+    # First, check for environment variable override
+    env_project_id = os.getenv("GEMINI_PROJECT_ID")
+    if env_project_id:
+        user_project_id = env_project_id
+        print(f"Using project ID from environment variable: {user_project_id}")
+        # Save the environment project ID to cache for consistency
+        save_credentials(creds, user_project_id)
+        return user_project_id
+
+    # Second, try to load project ID from credential file
     if os.path.exists(CREDENTIAL_FILE):
         try:
             with open(CREDENTIAL_FILE, "r") as f:
@@ -101,8 +149,8 @@ def get_user_project_id(creds):
         except Exception as e:
             print(f"Could not load project ID from cache: {e}")
 
-    # If not found in cache, probe for it
-    print("Project ID not found in cache. Probing for user project ID...")
+    # If not found in environment or cache, probe for it
+    print("Project ID not found in environment or cache. Probing for user project ID...")
     headers = {
         "Authorization": f"Bearer {creds.token}",
         "Content-Type": "application/json",
@@ -253,10 +301,25 @@ def get_credentials():
 
 
 @app.post("/{full_path:path}")
-async def proxy_request(request: Request, full_path: str):
+async def proxy_request(request: Request, full_path: str, username: str = Depends(authenticate_user)):
     creds = get_credentials()
     if not creds:
         return Response(content="Authentication failed. Please restart the proxy to log in.", status_code=500)
+
+    # Only check if credentials are properly formed and not expired locally
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            print("Credentials expired locally. Refreshing...")
+            try:
+                creds.refresh(GoogleAuthRequest())
+                save_credentials(creds)
+                print("Credentials refreshed successfully.")
+            except Exception as e:
+                print(f"Could not refresh token during request: {e}")
+                return Response(content="Token refresh failed. Please restart the proxy to re-authenticate.", status_code=500)
+        else:
+            print("Credentials are invalid locally and cannot be refreshed.")
+            return Response(content="Invalid credentials. Please restart the proxy to re-authenticate.", status_code=500)
 
     proj_id = get_user_project_id(creds)
     if not proj_id:
@@ -278,10 +341,31 @@ async def proxy_request(request: Request, full_path: str):
             is_streaming = True
     else:
         target_url = f"{CODE_ASSIST_ENDPOINT}{path}"
+    
+    # Remove authentication query parameters before forwarding to Google API
+    query_params = dict(request.query_params)
+    # Remove our authentication parameters
+    query_params.pop("key", None)
+    
+    # Add remaining query parameters to target URL if any
+    if query_params:
+        from urllib.parse import urlencode
+        target_url += "?" + urlencode(query_params)
 
     try:
         incoming_json = json.loads(post_data)
         final_model = model_name_from_url if model_match else incoming_json.get("model")
+        
+        # Set default safety settings to BLOCK_NONE if not specified by user
+        safety_settings = incoming_json.get("safetySettings")
+        if not safety_settings:
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"}
+            ]
         
         structured_payload = {
             "model": final_model,
@@ -292,7 +376,7 @@ async def proxy_request(request: Request, full_path: str):
                 "cachedContent": incoming_json.get("cachedContent"),
                 "tools": incoming_json.get("tools"),
                 "toolConfig": incoming_json.get("toolConfig"),
-                "safetySettings": incoming_json.get("safetySettings"),
+                "safetySettings": safety_settings,
                 "generationConfig": incoming_json.get("generationConfig"),
             },
         }
@@ -318,9 +402,31 @@ async def proxy_request(request: Request, full_path: str):
                 print(f"[STREAM] Starting streaming request to: {target_url}")
                 print(f"[STREAM] Request payload size: {len(final_post_data)} bytes")
                 
-                with requests.post(target_url, data=final_post_data, headers=headers, stream=True) as resp:
-                    print(f"[STREAM] Response status: {resp.status_code}")
-                    print(f"[STREAM] Response headers: {dict(resp.headers)}")
+                # Make the initial streaming request
+                resp = requests.post(target_url, data=final_post_data, headers=headers, stream=True)
+                print(f"[STREAM] Response status: {resp.status_code}")
+                print(f"[STREAM] Response headers: {dict(resp.headers)}")
+                
+                # If we get a 401, try refreshing the token and retry once
+                if resp.status_code == 401 and creds.refresh_token:
+                    print("[STREAM] Received 401 from Google API. Attempting to refresh token and retry...")
+                    resp.close()  # Close the failed response
+                    try:
+                        creds.refresh(GoogleAuthRequest())
+                        save_credentials(creds)
+                        print("[STREAM] Token refreshed successfully. Retrying streaming request...")
+                        
+                        # Update headers with new token and retry
+                        headers["Authorization"] = f"Bearer {creds.token}"
+                        resp = requests.post(target_url, data=final_post_data, headers=headers, stream=True)
+                        print(f"[STREAM] Retry request status: {resp.status_code}")
+                    except Exception as e:
+                        print(f"[STREAM] Could not refresh token after 401 error: {e}")
+                        error_message = json.dumps({"error": {"message": "Token refresh failed after 401 error. Please restart the proxy to re-authenticate."}})
+                        yield f"data: {error_message}\n\n"
+                        return
+                
+                with resp:
                     resp.raise_for_status()
                     
                     buffer = ""
@@ -332,55 +438,44 @@ async def proxy_request(request: Request, full_path: str):
                     
                     print(f"[STREAM] Starting to process chunks...")
                     
-                    for chunk in resp.iter_content(chunk_size=1024, decode_unicode=True):
+                    for chunk in resp.iter_content(chunk_size=1024):
+                        if isinstance(chunk, bytes):
+                            chunk = chunk.decode('utf-8', errors='replace')
                         chunk_count += 1
                         chunk_size = len(chunk) if chunk else 0
                         total_bytes += chunk_size
                         
-                        print(f"[STREAM] Chunk #{chunk_count}: {chunk_size} bytes, total: {total_bytes} bytes")
-                        if chunk:
-                            print(f"[STREAM] Chunk content preview: {repr(chunk[:100])}")
-                        
                         buffer += chunk
-                        print(f"[STREAM] Buffer size after chunk: {len(buffer)} chars")
                         
                         # Process complete JSON objects from the buffer
                         processing_iterations = 0
                         while buffer:
                             processing_iterations += 1
                             if processing_iterations > 100:  # Prevent infinite loops
-                                print(f"[STREAM] WARNING: Too many processing iterations, breaking")
                                 break
                                 
                             buffer = buffer.lstrip()
                             
                             if not buffer:
-                                print(f"[STREAM] Buffer empty after lstrip")
                                 break
-                                
-                            print(f"[STREAM] Processing buffer (len={len(buffer)}): {repr(buffer[:50])}")
-                                
+                                                                
                             # Handle array start
                             if buffer.startswith('[') and not in_array:
-                                print(f"[STREAM] Found array start, entering array mode")
                                 buffer = buffer[1:].lstrip()
                                 in_array = True
                                 continue
                             
                             # Handle array end
                             if buffer.startswith(']'):
-                                print(f"[STREAM] Found array end, stopping processing")
                                 break
                                 
                             # Skip commas between objects
                             if buffer.startswith(','):
-                                print(f"[STREAM] Skipping comma separator")
                                 buffer = buffer[1:].lstrip()
                                 continue
                             
                             # Look for complete JSON objects
                             if buffer.startswith('{'):
-                                print(f"[STREAM] Found object start, parsing JSON object...")
                                 brace_count = 0
                                 in_string = False
                                 escape_next = False
@@ -410,36 +505,24 @@ async def proxy_request(request: Request, full_path: str):
                                     json_str = buffer[:end_pos]
                                     buffer = buffer[end_pos:].lstrip()
                                     
-                                    print(f"[STREAM] Found complete JSON object ({len(json_str)} chars): {repr(json_str[:200])}")
                                     
                                     try:
                                         obj = json.loads(json_str)
-                                        print(f"[STREAM] Successfully parsed JSON object with keys: {list(obj.keys())}")
                                         
                                         if "response" in obj:
                                             response_chunk = obj["response"]
                                             objects_yielded += 1
                                             response_json = json.dumps(response_chunk)
-                                            print(f"[STREAM] Yielding object #{objects_yielded} (response size: {len(response_json)} chars)")
-                                            print(f"[STREAM] Response content preview: {repr(response_json[:200])}")
                                             yield f"data: {response_json}\n\n"
-                                        else:
-                                            print(f"[STREAM] Object has no 'response' key, skipping")
                                     except json.JSONDecodeError as e:
-                                        print(f"[STREAM] Failed to parse JSON object: {e}")
-                                        print(f"[STREAM] Problematic JSON: {repr(json_str[:500])}")
                                         continue
                                 else:
                                     # Incomplete object, wait for more data
-                                    print(f"[STREAM] Incomplete JSON object (brace_count={brace_count}), waiting for more data")
                                     break
                             else:
                                 # Skip unexpected characters
-                                print(f"[STREAM] Skipping unexpected character: {repr(buffer[0])}")
                                 buffer = buffer[1:]
                     
-                    print(f"[STREAM] Finished processing. Total chunks: {chunk_count}, total bytes: {total_bytes}, objects yielded: {objects_yielded}")
-
             except requests.exceptions.RequestException as e:
                 print(f"Error during streaming request: {e}")
                 error_message = json.dumps({"error": {"message": f"Upstream request failed: {e}"}})
@@ -451,11 +534,28 @@ async def proxy_request(request: Request, full_path: str):
 
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
     else:
+        # Make the request
         resp = requests.post(target_url, data=final_post_data, headers=headers)
+        
+        # If we get a 401, try refreshing the token and retry once
+        if resp.status_code == 401 and creds.refresh_token:
+            print("Received 401 from Google API. Attempting to refresh token and retry...")
+            try:
+                creds.refresh(GoogleAuthRequest())
+                save_credentials(creds)
+                print("Token refreshed successfully. Retrying request...")
+                
+                # Update headers with new token and retry
+                headers["Authorization"] = f"Bearer {creds.token}"
+                resp = requests.post(target_url, data=final_post_data, headers=headers)
+                print(f"Retry request status: {resp.status_code}")
+            except Exception as e:
+                print(f"Could not refresh token after 401 error: {e}")
+                return Response(content="Token refresh failed after 401 error. Please restart the proxy to re-authenticate.", status_code=500)
+        
         if resp.status_code == 200:
             try:
                 google_api_response = resp.json()
-                # The actual response is nested under the "response" key
                 # The actual response is nested under the "response" key
                 standard_gemini_response = google_api_response.get("response")
                 # The standard client expects a list containing the response object
@@ -473,8 +573,10 @@ if __name__ == "__main__":
     creds = get_credentials()
     if creds:
         get_user_project_id(creds)
-        print("\nStarting Gemini proxy server on http://localhost:8888")
+        print(f"\nStarting Gemini proxy server on http://localhost:{GEMINI_PORT}")
         print("Send your Gemini API requests to this address.")
-        uvicorn.run(app, host="0.0.0.0", port=8888)
+        print(f"Authentication required - Password: {GEMINI_AUTH_PASSWORD}")
+        print("Use HTTP Basic Authentication with any username and the password above.")
+        uvicorn.run(app, host="0.0.0.0", port=GEMINI_PORT)
     else:
         print("\nCould not obtain credentials. Please authenticate and restart the server.")

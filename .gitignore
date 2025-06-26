@@ -2,6 +2,9 @@
 oauth_creds.json
 *.json
 
+# Environment configuration
+.env
+
 # Python
 __pycache__/
 *.py[cod]
