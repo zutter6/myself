@@ -541,9 +541,11 @@ def get_credentials():
 
 
 @app.get("/v1/models")
+@app.get("/v1beta/models")
 async def list_models(request: Request, username: str = Depends(authenticate_user)):
     """List available models - matching gemini-cli supported models exactly."""
-    print(f"[GET] /v1/models - User: {username}")
+    print(f"[GET] {request.url.path} - User: {username}")
+    print(f"[MODELS] Serving models list (both /v1/models and /v1beta/models return the same data)")
     
     # Return all models supported by gemini-cli based on tokenLimits.ts
     models_response = {
