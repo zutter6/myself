@@ -799,8 +799,8 @@ async def proxy_request(request: Request, full_path: str, username: str = Depend
                 google_api_response = resp.json()
                 # The actual response is nested under the "response" key
                 standard_gemini_response = google_api_response.get("response")
-                # The standard client expects a list containing the response object
-                return Response(content=json.dumps([standard_gemini_response]), status_code=200, media_type="application/json")
+                # Return the response object directly, not wrapped in a list
+                return Response(content=json.dumps(standard_gemini_response), status_code=200, media_type="application/json")
             except (json.JSONDecodeError, AttributeError) as e:
                 print(f"Error converting to standard Gemini format: {e}")
                 # Fallback to sending the original content if conversion fails
