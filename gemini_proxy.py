@@ -357,19 +357,29 @@ def get_user_project_id(creds):
         raise
 
 def save_credentials(creds, project_id=None):
+    print(f"DEBUG: Saving credentials - Token: {creds.token[:20] if creds.token else 'None'}..., Expired: {creds.expired}, Expiry: {creds.expiry}")
+    
     creds_data = {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
-        "access_token": creds.token,
+        "token": creds.token,  # Use 'token' instead of 'access_token' for consistency with Google Auth Library
         "refresh_token": creds.refresh_token,
-        "scope": " ".join(creds.scopes) if creds.scopes else " ".join(SCOPES),
-        "token_type": "Bearer",
+        "scopes": creds.scopes if creds.scopes else SCOPES,  # Use 'scopes' as list instead of 'scope' as string
         "token_uri": "https://oauth2.googleapis.com/token",
     }
     
-    # Add expiry if available
+    # Add expiry if available - ensure it's timezone-aware
     if creds.expiry:
-        creds_data["expiry"] = creds.expiry.isoformat()
+        # Ensure the expiry is timezone-aware (UTC)
+        if creds.expiry.tzinfo is None:
+            from datetime import timezone
+            expiry_utc = creds.expiry.replace(tzinfo=timezone.utc)
+        else:
+            expiry_utc = creds.expiry
+        creds_data["expiry"] = expiry_utc.isoformat()
+        print(f"DEBUG: Saving expiry as: {creds_data['expiry']}")
+    else:
+        print("DEBUG: No expiry time available to save")
     
     # If project_id is provided, save it; otherwise preserve existing project_id
     if project_id:
@@ -383,12 +393,24 @@ def save_credentials(creds, project_id=None):
         except Exception:
             pass  # If we can't read existing file, just continue without project_id
     
+    print(f"DEBUG: Final credential data to save: {json.dumps(creds_data, indent=2)}")
+    
     with open(CREDENTIAL_FILE, "w") as f:
-        json.dump(creds_data, f)
+        json.dump(creds_data, f, indent=2)
+    
+    print("DEBUG: Credentials saved to file")
 
 def get_credentials():
     """Loads credentials matching gemini-cli OAuth2 flow."""
     global credentials
+    
+    # First, check if we already have valid credentials in memory
+    if credentials and credentials.token:
+        print("Using valid credentials from memory cache.")
+        print(f"DEBUG: Memory credentials - Token: {credentials.token[:20] if credentials.token else 'None'}..., Expired: {credentials.expired}, Expiry: {credentials.expiry}")
+        return credentials
+    else:
+        print("No valid credentials in memory. Loading from disk.")
     
     # Check environment for credentials first
     env_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -398,10 +420,7 @@ def get_credentials():
                 creds_data = json.load(f)
             credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
             print("Loaded credentials from GOOGLE_APPLICATION_CREDENTIALS.")
-            if credentials.expired and credentials.refresh_token:
-                print("Refreshing expired credentials...")
-                credentials.refresh(GoogleAuthRequest())
-                save_credentials(credentials)
+            print(f"DEBUG: Env credentials - Token: {credentials.token[:20] if credentials.token else 'None'}..., Expired: {credentials.expired}, Expiry: {credentials.expiry}")
             return credentials
         except Exception as e:
             print(f"Could not load credentials from GOOGLE_APPLICATION_CREDENTIALS: {e}")
@@ -412,53 +431,49 @@ def get_credentials():
             with open(CREDENTIAL_FILE, "r") as f:
                 creds_data = json.load(f)
             
+            print(f"DEBUG: Raw credential data from file: {json.dumps(creds_data, indent=2)}")
+            
+            # Handle both old format (access_token) and new format (token)
+            if "access_token" in creds_data and "token" not in creds_data:
+                creds_data["token"] = creds_data["access_token"]
+                print("DEBUG: Converted access_token to token field")
+            
+            # Handle both old format (scope as string) and new format (scopes as list)
+            if "scope" in creds_data and "scopes" not in creds_data:
+                creds_data["scopes"] = creds_data["scope"].split()
+                print("DEBUG: Converted scope string to scopes list")
+            
             credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
             print("Loaded credentials from cache.")
+            print(f"DEBUG: Loaded credentials - Token: {credentials.token[:20] if credentials.token else 'None'}..., Expired: {credentials.expired}, Expiry: {credentials.expiry}")
             
-            # Try to refresh if we have refresh token but no access token
-            if not credentials.token and credentials.refresh_token:
-                print("Attempting to refresh credentials...")
-                try:
-                    from google.auth.transport.requests import Request as AuthRequest
-                    auth_request = AuthRequest()
-                    credentials.refresh(auth_request)
-                    print("Credentials refreshed successfully!")
-                    
-                    # Save refreshed credentials
-                    updated_creds_data = {
-                        'client_id': credentials.client_id,
-                        'client_secret': credentials.client_secret,
-                        'access_token': credentials.token,
-                        'refresh_token': credentials.refresh_token,
-                        'scope': credentials.scopes,
-                        'token_type': 'Bearer',
-                        'token_uri': credentials.token_uri,
-                        'expiry': credentials.expiry.isoformat() if credentials.expiry else None,
-                        'project_id': creds_data.get('project_id')
-                    }
-                    
-                    with open(CREDENTIAL_FILE, 'w') as f:
-                        json.dump(updated_creds_data, f, indent=2)
-                    print("Refreshed credentials saved.")
-                    
-                except Exception as e:
-                    print(f"Failed to refresh credentials: {e}")
-                    return None
-            
-            # Check if we have a valid token after potential refresh
-            if not credentials.token:
-                print("No access token available after refresh attempt. Starting new login.")
-                return None
+            # Manual expiry check to avoid timezone issues
+            if credentials.expiry:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
                 
-            if credentials.expired and credentials.refresh_token:
-                print("Refreshing expired credentials...")
-                try:
-                    credentials.refresh(GoogleAuthRequest())
-                    save_credentials(credentials)
-                    print("Credentials refreshed and saved.")
-                except Exception as refresh_error:
-                    print(f"Failed to refresh credentials: {refresh_error}. Starting new login.")
-                    return None
+                # Handle timezone-naive expiry by assuming it's UTC
+                if credentials.expiry.tzinfo is None:
+                    expiry_utc = credentials.expiry.replace(tzinfo=timezone.utc)
+                else:
+                    expiry_utc = credentials.expiry
+                
+                time_until_expiry = expiry_utc - now
+                print(f"DEBUG: Current time: {now}")
+                print(f"DEBUG: Token expires at: {expiry_utc}")
+                print(f"DEBUG: Time until expiry: {time_until_expiry}")
+                
+                # Override the expired property if the token is actually still valid
+                is_actually_expired = time_until_expiry.total_seconds() <= 0
+                print(f"DEBUG: Token is actually expired: {is_actually_expired}")
+                print(f"DEBUG: Google Auth Library says expired: {credentials.expired}")
+                
+                if not is_actually_expired and credentials.token:
+                    print("DEBUG: Token is valid, overriding expired status")
+                    # Monkey patch the expired property to return False
+                    credentials._expiry = expiry_utc
+                    return credentials
+            
             return credentials
         except Exception as e:
             print(f"Could not load cached credentials: {e}. Starting new login.")
@@ -525,6 +540,149 @@ def get_credentials():
         oauthlib.oauth2.rfc6749.parameters.validate_token_parameters = original_validate
 
 
+@app.get("/v1/models")
+async def list_models(request: Request, username: str = Depends(authenticate_user)):
+    """List available models - matching gemini-cli supported models exactly."""
+    print(f"[GET] /v1/models - User: {username}")
+    
+    # Return all models supported by gemini-cli based on tokenLimits.ts
+    models_response = {
+        "models": [
+            {
+                "name": "models/gemini-1.5-pro",
+                "version": "001",
+                "displayName": "Gemini 1.5 Pro",
+                "description": "Mid-size multimodal model that supports up to 2 million tokens",
+                "inputTokenLimit": 2097152,
+                "outputTokenLimit": 8192,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                "temperature": 1.0,
+                "maxTemperature": 2.0,
+                "topP": 0.95,
+                "topK": 64
+            },
+            {
+                "name": "models/gemini-1.5-flash",
+                "version": "001",
+                "displayName": "Gemini 1.5 Flash",
+                "description": "Fast and versatile multimodal model for scaling across diverse tasks",
+                "inputTokenLimit": 1048576,
+                "outputTokenLimit": 8192,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                "temperature": 1.0,
+                "maxTemperature": 2.0,
+                "topP": 0.95,
+                "topK": 64
+            },
+            {
+                "name": "models/gemini-2.5-pro-preview-05-06",
+                "version": "001",
+                "displayName": "Gemini 2.5 Pro Preview 05-06",
+                "description": "Preview version of Gemini 2.5 Pro from May 6th",
+                "inputTokenLimit": 1048576,
+                "outputTokenLimit": 8192,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                "temperature": 1.0,
+                "maxTemperature": 2.0,
+                "topP": 0.95,
+                "topK": 64
+            },
+            {
+                "name": "models/gemini-2.5-pro-preview-06-05",
+                "version": "001",
+                "displayName": "Gemini 2.5 Pro Preview 06-05",
+                "description": "Preview version of Gemini 2.5 Pro from June 5th",
+                "inputTokenLimit": 1048576,
+                "outputTokenLimit": 8192,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                "temperature": 1.0,
+                "maxTemperature": 2.0,
+                "topP": 0.95,
+                "topK": 64
+            },
+            {
+                "name": "models/gemini-2.5-pro",
+                "version": "001",
+                "displayName": "Gemini 2.5 Pro",
+                "description": "Advanced multimodal model with enhanced capabilities",
+                "inputTokenLimit": 1048576,
+                "outputTokenLimit": 8192,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                "temperature": 1.0,
+                "maxTemperature": 2.0,
+                "topP": 0.95,
+                "topK": 64
+            },
+            {
+                "name": "models/gemini-2.5-flash-preview-05-20",
+                "version": "001",
+                "displayName": "Gemini 2.5 Flash Preview 05-20",
+                "description": "Preview version of Gemini 2.5 Flash from May 20th",
+                "inputTokenLimit": 1048576,
+                "outputTokenLimit": 8192,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                "temperature": 1.0,
+                "maxTemperature": 2.0,
+                "topP": 0.95,
+                "topK": 64
+            },
+            {
+                "name": "models/gemini-2.5-flash",
+                "version": "001",
+                "displayName": "Gemini 2.5 Flash",
+                "description": "Fast and efficient multimodal model with latest improvements",
+                "inputTokenLimit": 1048576,
+                "outputTokenLimit": 8192,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                "temperature": 1.0,
+                "maxTemperature": 2.0,
+                "topP": 0.95,
+                "topK": 64
+            },
+            {
+                "name": "models/gemini-2.0-flash",
+                "version": "001",
+                "displayName": "Gemini 2.0 Flash",
+                "description": "Latest generation fast multimodal model",
+                "inputTokenLimit": 1048576,
+                "outputTokenLimit": 8192,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                "temperature": 1.0,
+                "maxTemperature": 2.0,
+                "topP": 0.95,
+                "topK": 64
+            },
+            {
+                "name": "models/gemini-2.0-flash-preview-image-generation",
+                "version": "001",
+                "displayName": "Gemini 2.0 Flash Preview Image Generation",
+                "description": "Preview version with image generation capabilities",
+                "inputTokenLimit": 32000,
+                "outputTokenLimit": 8192,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                "temperature": 1.0,
+                "maxTemperature": 2.0,
+                "topP": 0.95,
+                "topK": 64
+            },
+            {
+                "name": "models/gemini-embedding-001",
+                "version": "001",
+                "displayName": "Gemini Embedding 001",
+                "description": "Text embedding model for semantic similarity and search",
+                "inputTokenLimit": 2048,
+                "outputTokenLimit": 1,
+                "supportedGenerationMethods": ["embedContent"],
+                "temperature": 0.0,
+                "maxTemperature": 0.0,
+                "topP": 1.0,
+                "topK": 1
+            }
+        ]
+    }
+    
+    return Response(content=json.dumps(models_response), status_code=200, media_type="application/json; charset=utf-8")
+
 @app.options("/{full_path:path}")
 async def handle_preflight(request: Request, full_path: str):
     """Handle CORS preflight requests without authentication."""
@@ -546,8 +704,10 @@ async def proxy_request(request: Request, full_path: str, username: str = Depend
     if not creds:
         print("❌ No credentials available")
         return Response(content="Authentication failed. Please restart the proxy to log in.", status_code=500)
+    
+    print(f"Using credentials - Token: {creds.token[:20] if creds.token else 'None'}..., Expired: {creds.expired}")
 
-    # Check if credentials need refreshing (more lenient validation)
+    # Check if credentials need refreshing (only when expired)
     if creds.expired and creds.refresh_token:
         print("Credentials expired. Refreshing...")
         try:
@@ -588,6 +748,10 @@ async def proxy_request(request: Request, full_path: str, username: str = Depend
     query_params = dict(request.query_params)
     # Remove our authentication parameters
     query_params.pop("key", None)
+    
+    # For streaming requests, always ensure alt=sse is set
+    if is_streaming:
+        query_params["alt"] = "sse"
     
     # Add remaining query parameters to target URL if any
     if query_params:
@@ -631,7 +795,7 @@ async def proxy_request(request: Request, full_path: str, username: str = Depend
     except (json.JSONDecodeError, AttributeError):
         final_post_data = post_data
 
-    headers = {
+    request_headers = {
         "Authorization": f"Bearer {creds.token}",
         "Content-Type": "application/json",
         "User-Agent": get_user_agent(),
@@ -642,157 +806,142 @@ async def proxy_request(request: Request, full_path: str, username: str = Depend
             try:
                 print(f"[STREAM] Starting streaming request to: {target_url}")
                 print(f"[STREAM] Request payload size: {len(final_post_data)} bytes")
+                print(f"[STREAM] Authorization header: Bearer {creds.token[:50]}...")
+                print(f"[STREAM] Full headers being sent: {request_headers}")
                 
                 # Make the initial streaming request
-                resp = requests.post(target_url, data=final_post_data, headers=headers, stream=True)
+                resp = requests.post(target_url, data=final_post_data, headers=request_headers, stream=True)
                 print(f"[STREAM] Response status: {resp.status_code}")
                 print(f"[STREAM] Response headers: {dict(resp.headers)}")
                 
-                # If we get a 401, try refreshing the token and retry once
-                if resp.status_code == 401 and creds.refresh_token:
-                    print("[STREAM] Received 401 from Google API. Attempting to refresh token and retry...")
-                    resp.close()  # Close the failed response
-                    try:
-                        creds.refresh(GoogleAuthRequest())
-                        save_credentials(creds)
-                        print("[STREAM] Token refreshed successfully. Retrying streaming request...")
-                        
-                        # Update headers with new token and retry
-                        headers["Authorization"] = f"Bearer {creds.token}"
-                        resp = requests.post(target_url, data=final_post_data, headers=headers, stream=True)
-                        print(f"[STREAM] Retry request status: {resp.status_code}")
-                    except Exception as e:
-                        print(f"[STREAM] Could not refresh token after 401 error: {e}")
-                        error_message = json.dumps({"error": {"message": "Token refresh failed after 401 error. Please restart the proxy to re-authenticate."}})
-                        yield f"data: {error_message}\n\n"
+                # If we get a 401, try refreshing the token once
+                if resp.status_code == 401:
+                    print("[STREAM] Received 401 from Google API. Attempting token refresh...")
+                    print(f"[STREAM] Response text: {resp.text}")
+                    
+                    if creds.refresh_token:
+                        try:
+                            creds.refresh(GoogleAuthRequest())
+                            save_credentials(creds)
+                            print("[STREAM] Token refreshed successfully. Retrying request...")
+                            
+                            # Update headers with new token
+                            request_headers["Authorization"] = f"Bearer {creds.token}"
+                            
+                            # Retry the request with refreshed token
+                            resp = requests.post(target_url, data=final_post_data, headers=request_headers, stream=True)
+                            print(f"[STREAM] Retry response status: {resp.status_code}")
+                            
+                            if resp.status_code == 401:
+                                print("[STREAM] Still getting 401 after token refresh.")
+                                yield f'data: {{"error": {{"message": "Authentication failed even after token refresh. Please restart the proxy to re-authenticate."}}}}\n\n'
+                                return
+                        except Exception as refresh_error:
+                            print(f"[STREAM] Token refresh failed: {refresh_error}")
+                            yield f'data: {{"error": {{"message": "Token refresh failed. Please restart the proxy to re-authenticate."}}}}\n\n'
+                            return
+                    else:
+                        print("[STREAM] No refresh token available.")
+                        yield f'data: {{"error": {{"message": "Authentication failed. Please restart the proxy to re-authenticate."}}}}\n\n'
                         return
                 
                 with resp:
                     resp.raise_for_status()
                     
-                    buffer = ""
-                    brace_count = 0
-                    in_array = False
-                    chunk_count = 0
-                    total_bytes = 0
-                    objects_yielded = 0
+                    # Process exactly like the real Gemini SDK
+                    print("[STREAM] Processing with Gemini SDK-compatible logic")
                     
-                    print(f"[STREAM] Starting to process chunks...")
-                    
-                    for chunk in resp.iter_content(chunk_size=1024):
-                        if isinstance(chunk, bytes):
-                            chunk = chunk.decode('utf-8', errors='replace')
-                        chunk_count += 1
-                        chunk_size = len(chunk) if chunk else 0
-                        total_bytes += chunk_size
-                        
-                        buffer += chunk
-                        
-                        # Process complete JSON objects from the buffer
-                        processing_iterations = 0
-                        while buffer:
-                            processing_iterations += 1
-                            if processing_iterations > 100:  # Prevent infinite loops
-                                break
+                    # Use iter_lines() exactly like the real Gemini SDK (without decode_unicode)
+                    # This should be non-blocking and yield lines as they arrive
+                    for chunk in resp.iter_lines():
+                        if chunk:
+                            # Decode UTF-8 if it's bytes (matching SDK logic exactly)
+                            if not isinstance(chunk, str):
+                                chunk = chunk.decode('utf-8')
+                                                        
+                            # Strip 'data: ' prefix if present (matching SDK logic)
+                            if chunk.startswith('data: '):
+                                chunk = chunk[len('data: '):]
                                 
-                            buffer = buffer.lstrip()
-                            
-                            if not buffer:
-                                break
-                                                                
-                            # Handle array start
-                            if buffer.startswith('[') and not in_array:
-                                buffer = buffer[1:].lstrip()
-                                in_array = True
-                                continue
-                            
-                            # Handle array end
-                            if buffer.startswith(']'):
-                                break
-                                
-                            # Skip commas between objects
-                            if buffer.startswith(','):
-                                buffer = buffer[1:].lstrip()
-                                continue
-                            
-                            # Look for complete JSON objects
-                            if buffer.startswith('{'):
-                                brace_count = 0
-                                in_string = False
-                                escape_next = False
-                                end_pos = -1
-                                
-                                for i, char in enumerate(buffer):
-                                    if escape_next:
-                                        escape_next = False
-                                        continue
-                                    if char == '\\':
-                                        escape_next = True
-                                        continue
-                                    if char == '"' and not escape_next:
-                                        in_string = not in_string
-                                        continue
-                                    if not in_string:
-                                        if char == '{':
-                                            brace_count += 1
-                                        elif char == '}':
-                                            brace_count -= 1
-                                            if brace_count == 0:
-                                                end_pos = i + 1
-                                                break
-                                
-                                if end_pos > 0:
-                                    # Found complete JSON object
-                                    json_str = buffer[:end_pos]
-                                    buffer = buffer[end_pos:].lstrip()
+                                try:
+                                    # Parse the JSON from Google's internal API
+                                    obj = json.loads(chunk)
                                     
-                                    
-                                    try:
-                                        obj = json.loads(json_str)
-                                        
-                                        if "response" in obj:
-                                            response_chunk = obj["response"]
-                                            objects_yielded += 1
-                                            response_json = json.dumps(response_chunk)
-                                            yield f"data: {response_json}\n\n"
-                                    except json.JSONDecodeError as e:
-                                        continue
-                                else:
-                                    # Incomplete object, wait for more data
-                                    break
-                            else:
-                                # Skip unexpected characters
-                                buffer = buffer[1:]
+                                    # Convert Google's internal format to standard Gemini format
+                                    if "response" in obj:
+                                        response_chunk = obj["response"]
+                                        # Output in standard Gemini streaming format
+                                        response_json = json.dumps(response_chunk, separators=(',', ':'))
+                                        yield f"data: {response_json}\n\n"
+                                except json.JSONDecodeError:
+                                    # Skip invalid JSON
+                                    continue
                     
             except requests.exceptions.RequestException as e:
                 print(f"Error during streaming request: {e}")
-                error_message = json.dumps({"error": {"message": f"Upstream request failed: {e}"}})
-                yield f"data: {error_message}\n\n"
+                # Format error as real Gemini API would
+                yield f'data: {{"error": {{"message": "Upstream request failed: {str(e)}"}}}}\n\n'
             except Exception as e:
                 print(f"An unexpected error occurred during streaming: {e}")
-                error_message = json.dumps({"error": {"message": f"An unexpected error occurred: {e}"}})
-                yield f"data: {error_message}\n\n"
+                # Format error as real Gemini API would
+                yield f'data: {{"error": {{"message": "An unexpected error occurred: {str(e)}"}}}}\n\n'
 
-        return StreamingResponse(stream_generator(), media_type="text/event-stream")
+        # Create the streaming response with headers matching real Gemini API
+        response_headers = {
+            "Content-Type": "text/event-stream",
+            "Content-Disposition": "attachment",
+            "Vary": "Origin, X-Origin, Referer",
+            "X-XSS-Protection": "0",
+            "X-Frame-Options": "SAMEORIGIN",
+            "X-Content-Type-Options": "nosniff",
+            "Server": "ESF"
+        }
+        
+        response = StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers=response_headers
+        )
+        
+        return response
     else:
         # Make the request
-        resp = requests.post(target_url, data=final_post_data, headers=headers)
+        print(f"[NON-STREAM] Starting request to: {target_url}")
+        print(f"[NON-STREAM] Authorization header: Bearer {creds.token[:50]}...")
+        print(f"[NON-STREAM] Full headers being sent: {request_headers}")
         
-        # If we get a 401, try refreshing the token and retry once
-        if resp.status_code == 401 and creds.refresh_token:
-            print("Received 401 from Google API. Attempting to refresh token and retry...")
-            try:
-                creds.refresh(GoogleAuthRequest())
-                save_credentials(creds)
-                print("Token refreshed successfully. Retrying request...")
-                
-                # Update headers with new token and retry
-                headers["Authorization"] = f"Bearer {creds.token}"
-                resp = requests.post(target_url, data=final_post_data, headers=headers)
-                print(f"Retry request status: {resp.status_code}")
-            except Exception as e:
-                print(f"Could not refresh token after 401 error: {e}")
-                return Response(content="Token refresh failed after 401 error. Please restart the proxy to re-authenticate.", status_code=500)
+        resp = requests.post(target_url, data=final_post_data, headers=request_headers)
+        
+        print(f"[NON-STREAM] Response status: {resp.status_code}")
+        print(f"[NON-STREAM] Response headers: {dict(resp.headers)}")
+        
+        # If we get a 401, try refreshing the token once
+        if resp.status_code == 401:
+            print("Received 401 from Google API. Attempting token refresh...")
+            print(f"Response text: {resp.text}")
+            
+            if creds.refresh_token:
+                try:
+                    creds.refresh(GoogleAuthRequest())
+                    save_credentials(creds)
+                    print("Token refreshed successfully. Retrying request...")
+                    
+                    # Update headers with new token
+                    request_headers["Authorization"] = f"Bearer {creds.token}"
+                    
+                    # Retry the request with refreshed token
+                    resp = requests.post(target_url, data=final_post_data, headers=request_headers)
+                    print(f"Retry response status: {resp.status_code}")
+                    
+                    if resp.status_code == 401:
+                        print("Still getting 401 after token refresh.")
+                        return Response(content="Authentication failed even after token refresh. Please restart the proxy to re-authenticate.", status_code=500)
+                except Exception as refresh_error:
+                    print(f"Token refresh failed: {refresh_error}")
+                    return Response(content="Token refresh failed. Please restart the proxy to re-authenticate.", status_code=500)
+            else:
+                print("No refresh token available.")
+                return Response(content="Authentication failed. Please restart the proxy to re-authenticate.", status_code=500)
         
         if resp.status_code == 200:
             try:
@@ -800,7 +949,7 @@ async def proxy_request(request: Request, full_path: str, username: str = Depend
                 # The actual response is nested under the "response" key
                 standard_gemini_response = google_api_response.get("response")
                 # Return the response object directly, not wrapped in a list
-                return Response(content=json.dumps(standard_gemini_response), status_code=200, media_type="application/json")
+                return Response(content=json.dumps(standard_gemini_response), status_code=200, media_type="application/json; charset=utf-8")
             except (json.JSONDecodeError, AttributeError) as e:
                 print(f"Error converting to standard Gemini format: {e}")
                 # Fallback to sending the original content if conversion fails
