@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+google-auth
+google-auth-oauthlib
+requests
+ijson
