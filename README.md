@@ -1,6 +1,6 @@
 # Gemini CLI to API Proxy
 
-A proxy server that converts Google's Gemini CLI authentication to standard API format, allowing you to use Gemini models with any OpenAI-compatible client.
+A proxy server that converts Google's Gemini CLI authentication to standard API format, allowing you to use Gemini models with any Gemini API client.
 
 ## Features
 
