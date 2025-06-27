@@ -421,6 +421,20 @@ def get_credentials():
             credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
             print("Loaded credentials from GOOGLE_APPLICATION_CREDENTIALS.")
             print(f"DEBUG: Env credentials - Token: {credentials.token[:20] if credentials.token else 'None'}..., Expired: {credentials.expired}, Expiry: {credentials.expiry}")
+            
+            # Always refresh tokens at startup when loading from file to avoid issues
+            if credentials.refresh_token:
+                print("Refreshing environment credentials at startup for reliability...")
+                try:
+                    credentials.refresh(GoogleAuthRequest())
+                    # Note: We don't save environment credentials back to the env file
+                    print("Startup token refresh successful for environment credentials.")
+                except Exception as refresh_error:
+                    print(f"Startup token refresh failed for environment credentials: {refresh_error}. Credentials may be stale.")
+                    # Continue with existing credentials - they might still work
+            else:
+                print("No refresh token available in environment credentials - using as-is.")
+            
             return credentials
         except Exception as e:
             print(f"Could not load credentials from GOOGLE_APPLICATION_CREDENTIALS: {e}")
@@ -473,6 +487,19 @@ def get_credentials():
                     # Monkey patch the expired property to return False
                     credentials._expiry = expiry_utc
                     return credentials
+            
+            # Always refresh tokens at startup when loading from file to avoid issues
+            if credentials.refresh_token:
+                print("Refreshing tokens at startup for reliability...")
+                try:
+                    credentials.refresh(GoogleAuthRequest())
+                    save_credentials(credentials)
+                    print("Startup token refresh successful.")
+                except Exception as refresh_error:
+                    print(f"Startup token refresh failed: {refresh_error}. Credentials may be stale.")
+                    # Continue with existing credentials - they might still work
+            else:
+                print("No refresh token available - using cached credentials as-is.")
             
             return credentials
         except Exception as e:
@@ -836,15 +863,15 @@ async def proxy_request(request: Request, full_path: str, username: str = Depend
                             
                             if resp.status_code == 401:
                                 print("[STREAM] Still getting 401 after token refresh.")
-                                yield f'data: {{"error": {{"message": "Authentication failed even after token refresh. Please restart the proxy to re-authenticate."}}}}\n\n'
+                                yield f'data: {{"error": {{"message": "Authentication failed even after token refresh. Please restart the proxy to re-authenticate."}}}}\n\n'.encode('utf-8')
                                 return
                         except Exception as refresh_error:
                             print(f"[STREAM] Token refresh failed: {refresh_error}")
-                            yield f'data: {{"error": {{"message": "Token refresh failed. Please restart the proxy to re-authenticate."}}}}\n\n'
+                            yield f'data: {{"error": {{"message": "Token refresh failed. Please restart the proxy to re-authenticate."}}}}\n\n'.encode('utf-8')
                             return
                     else:
                         print("[STREAM] No refresh token available.")
-                        yield f'data: {{"error": {{"message": "Authentication failed. Please restart the proxy to re-authenticate."}}}}\n\n'
+                        yield f'data: {{"error": {{"message": "Authentication failed. Please restart the proxy to re-authenticate."}}}}\n\n'.encode('utf-8')
                         return
                 
                 with resp:
@@ -874,7 +901,9 @@ async def proxy_request(request: Request, full_path: str, username: str = Depend
                                         response_chunk = obj["response"]
                                         # Output in standard Gemini streaming format
                                         response_json = json.dumps(response_chunk, separators=(',', ':'))
-                                        yield f"data: {response_json}\n\n"
+                                        # Encode back to UTF-8 bytes to match exactly what real Gemini API sends
+                                        response_line = f"data: {response_json}\n\n"
+                                        yield response_line.encode('utf-8')
                                 except json.JSONDecodeError:
                                     # Skip invalid JSON
                                     continue
@@ -882,11 +911,11 @@ async def proxy_request(request: Request, full_path: str, username: str = Depend
             except requests.exceptions.RequestException as e:
                 print(f"Error during streaming request: {e}")
                 # Format error as real Gemini API would
-                yield f'data: {{"error": {{"message": "Upstream request failed: {str(e)}"}}}}\n\n'
+                yield f'data: {{"error": {{"message": "Upstream request failed: {str(e)}"}}}}\n\n'.encode('utf-8')
             except Exception as e:
                 print(f"An unexpected error occurred during streaming: {e}")
                 # Format error as real Gemini API would
-                yield f'data: {{"error": {{"message": "An unexpected error occurred: {str(e)}"}}}}\n\n'
+                yield f'data: {{"error": {{"message": "An unexpected error occurred: {str(e)}"}}}}\n\n'.encode('utf-8')
 
         # Create the streaming response with headers matching real Gemini API
         response_headers = {
