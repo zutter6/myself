@@ -49,7 +49,8 @@ async def openai_chat_completions(
             content=json.dumps({
                 "error": {
                     "message": f"Request processing failed: {str(e)}",
-                    "type": "invalid_request_error"
+                    "type": "invalid_request_error",
+                    "code": 400
                 }
             }),
             status_code=400,
@@ -76,6 +77,21 @@ async def openai_chat_completions(
                                 chunk_data = chunk[6:]  # Remove 'data: ' prefix
                                 gemini_chunk = json.loads(chunk_data)
                                 
+                                # Check if this is an error chunk
+                                if "error" in gemini_chunk:
+                                    logging.error(f"Error in streaming response: {gemini_chunk['error']}")
+                                    # Transform error to OpenAI format
+                                    error_data = {
+                                        "error": {
+                                            "message": gemini_chunk["error"].get("message", "Unknown error"),
+                                            "type": gemini_chunk["error"].get("type", "api_error"),
+                                            "code": gemini_chunk["error"].get("code")
+                                        }
+                                    }
+                                    yield f"data: {json.dumps(error_data)}\n\n"
+                                    yield "data: [DONE]\n\n"
+                                    return
+                                
                                 # Transform to OpenAI format
                                 openai_chunk = gemini_stream_chunk_to_openai(
                                     gemini_chunk,
@@ -95,18 +111,32 @@ async def openai_chat_completions(
                     yield "data: [DONE]\n\n"
                     logging.info(f"Completed streaming response: {response_id}")
                 else:
-                    # Error case - log and forward the error response
+                    # Error case - handle Response object with error
                     error_msg = "Streaming request failed"
-                    if hasattr(response, 'status_code'):
-                        error_msg += f" (status: {response.status_code})"
-                    if hasattr(response, 'body'):
-                        error_msg += f" (body: {response.body})"
+                    status_code = 500
                     
-                    logging.error(error_msg)
+                    if hasattr(response, 'status_code'):
+                        status_code = response.status_code
+                        error_msg += f" (status: {status_code})"
+                    
+                    if hasattr(response, 'body'):
+                        try:
+                            # Try to parse error response
+                            error_body = response.body
+                            if isinstance(error_body, bytes):
+                                error_body = error_body.decode('utf-8')
+                            error_data = json.loads(error_body)
+                            if "error" in error_data:
+                                error_msg = error_data["error"].get("message", error_msg)
+                        except:
+                            pass
+                    
+                    logging.error(f"Streaming request failed: {error_msg}")
                     error_data = {
                         "error": {
                             "message": error_msg,
-                            "type": "api_error"
+                            "type": "invalid_request_error" if status_code == 404 else "api_error",
+                            "code": status_code
                         }
                     }
                     yield f"data: {json.dumps(error_data)}\n\n"
@@ -116,7 +146,8 @@ async def openai_chat_completions(
                 error_data = {
                     "error": {
                         "message": f"Streaming failed: {str(e)}",
-                        "type": "api_error"
+                        "type": "api_error",
+                        "code": 500
                     }
                 }
                 yield f"data: {json.dumps(error_data)}\n\n"
@@ -133,9 +164,45 @@ async def openai_chat_completions(
             response = send_gemini_request(gemini_payload, is_streaming=False)
             
             if isinstance(response, Response) and response.status_code != 200:
-                # Log and forward error responses
-                logging.error(f"Gemini API error: status={response.status_code}, body={response.body}")
-                return response
+                # Handle error responses from Google API
+                logging.error(f"Gemini API error: status={response.status_code}")
+                
+                try:
+                    # Try to parse the error response and transform to OpenAI format
+                    error_body = response.body
+                    if isinstance(error_body, bytes):
+                        error_body = error_body.decode('utf-8')
+                    
+                    error_data = json.loads(error_body)
+                    if "error" in error_data:
+                        # Transform Google API error to OpenAI format
+                        openai_error = {
+                            "error": {
+                                "message": error_data["error"].get("message", f"API error: {response.status_code}"),
+                                "type": error_data["error"].get("type", "invalid_request_error" if response.status_code == 404 else "api_error"),
+                                "code": error_data["error"].get("code", response.status_code)
+                            }
+                        }
+                        return Response(
+                            content=json.dumps(openai_error),
+                            status_code=response.status_code,
+                            media_type="application/json"
+                        )
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+                
+                # Fallback error response
+                return Response(
+                    content=json.dumps({
+                        "error": {
+                            "message": f"API error: {response.status_code}",
+                            "type": "invalid_request_error" if response.status_code == 404 else "api_error",
+                            "code": response.status_code
+                        }
+                    }),
+                    status_code=response.status_code,
+                    media_type="application/json"
+                )
             
             try:
                 # Parse Gemini response and transform to OpenAI format
@@ -151,7 +218,8 @@ async def openai_chat_completions(
                     content=json.dumps({
                         "error": {
                             "message": f"Failed to process response: {str(e)}",
-                            "type": "api_error"
+                            "type": "api_error",
+                            "code": 500
                         }
                     }),
                     status_code=500,
@@ -163,7 +231,8 @@ async def openai_chat_completions(
                 content=json.dumps({
                     "error": {
                         "message": f"Request failed: {str(e)}",
-                        "type": "api_error"
+                        "type": "api_error",
+                        "code": 500
                     }
                 }),
                 status_code=500,
@@ -225,7 +294,8 @@ async def openai_list_models(username: str = Depends(authenticate_user)):
             content=json.dumps({
                 "error": {
                     "message": f"Failed to list models: {str(e)}",
-                    "type": "api_error"
+                    "type": "api_error",
+                    "code": 500
                 }
             }),
             status_code=500,

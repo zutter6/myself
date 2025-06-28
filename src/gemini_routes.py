@@ -4,6 +4,7 @@ This module provides native Gemini API endpoints that proxy directly to Google's
 without any format transformations.
 """
 import json
+import logging
 from fastapi import APIRouter, Request, Response, Depends
 
 from .auth import authenticate_user
@@ -20,15 +21,31 @@ async def gemini_list_models(request: Request, username: str = Depends(authentic
     Returns available models in Gemini format, matching the official Gemini API.
     """
     
-    models_response = {
-        "models": SUPPORTED_MODELS
-    }
-    
-    return Response(
-        content=json.dumps(models_response), 
-        status_code=200, 
-        media_type="application/json; charset=utf-8"
-    )
+    try:
+        logging.info("Gemini models list requested")
+        
+        models_response = {
+            "models": SUPPORTED_MODELS
+        }
+        
+        logging.info(f"Returning {len(SUPPORTED_MODELS)} Gemini models")
+        return Response(
+            content=json.dumps(models_response),
+            status_code=200,
+            media_type="application/json; charset=utf-8"
+        )
+    except Exception as e:
+        logging.error(f"Failed to list Gemini models: {str(e)}")
+        return Response(
+            content=json.dumps({
+                "error": {
+                    "message": f"Failed to list models: {str(e)}",
+                    "code": 500
+                }
+            }),
+            status_code=500,
+            media_type="application/json"
+        )
 
 
 @router.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -44,53 +61,78 @@ async def gemini_proxy(request: Request, full_path: str, username: str = Depends
     - etc.
     """
     
-    # Get the request body
-    post_data = await request.body()
-    
-    # Determine if this is a streaming request
-    is_streaming = "stream" in full_path.lower()
-    
-    # Extract model name from the path
-    # Paths typically look like: v1beta/models/gemini-1.5-pro/generateContent
-    model_name = _extract_model_from_path(full_path)
-    
-    if not model_name:
-        return Response(
-            content=json.dumps({
-                "error": {
-                    "message": f"Could not extract model name from path: {full_path}",
-                    "code": 400
-                }
-            }),
-            status_code=400,
-            media_type="application/json"
-        )
-    
-    # Parse the incoming request
     try:
-        if post_data:
-            incoming_request = json.loads(post_data)
-        else:
-            incoming_request = {}
-    except json.JSONDecodeError:
+        # Get the request body
+        post_data = await request.body()
+        
+        # Determine if this is a streaming request
+        is_streaming = "stream" in full_path.lower()
+        
+        # Extract model name from the path
+        # Paths typically look like: v1beta/models/gemini-1.5-pro/generateContent
+        model_name = _extract_model_from_path(full_path)
+        
+        logging.info(f"Gemini proxy request: path={full_path}, model={model_name}, stream={is_streaming}")
+        
+        if not model_name:
+            logging.error(f"Could not extract model name from path: {full_path}")
+            return Response(
+                content=json.dumps({
+                    "error": {
+                        "message": f"Could not extract model name from path: {full_path}",
+                        "code": 400
+                    }
+                }),
+                status_code=400,
+                media_type="application/json"
+            )
+        
+        # Parse the incoming request
+        try:
+            if post_data:
+                incoming_request = json.loads(post_data)
+            else:
+                incoming_request = {}
+        except json.JSONDecodeError as e:
+            logging.error(f"Invalid JSON in request body: {str(e)}")
+            return Response(
+                content=json.dumps({
+                    "error": {
+                        "message": "Invalid JSON in request body",
+                        "code": 400
+                    }
+                }),
+                status_code=400,
+                media_type="application/json"
+            )
+        
+        # Build the payload for Google API
+        gemini_payload = build_gemini_payload_from_native(incoming_request, model_name)
+        
+        # Send the request to Google API
+        response = send_gemini_request(gemini_payload, is_streaming=is_streaming)
+        
+        # Log the response status
+        if hasattr(response, 'status_code'):
+            if response.status_code != 200:
+                logging.error(f"Gemini API returned error: status={response.status_code}")
+            else:
+                logging.info(f"Successfully processed Gemini request for model: {model_name}")
+        
+        return response
+        
+    except Exception as e:
+        logging.error(f"Gemini proxy error: {str(e)}")
         return Response(
             content=json.dumps({
                 "error": {
-                    "message": "Invalid JSON in request body",
-                    "code": 400
+                    "message": f"Proxy error: {str(e)}",
+                    "code": 500
                 }
             }),
-            status_code=400,
+            status_code=500,
             media_type="application/json"
         )
-    
-    # Build the payload for Google API
-    gemini_payload = build_gemini_payload_from_native(incoming_request, model_name)
-    
-    # Send the request to Google API
-    response = send_gemini_request(gemini_payload, is_streaming=is_streaming)
-    
-    return response
 
 
 def _extract_model_from_path(path: str) -> str:

@@ -3,6 +3,7 @@ Google API Client - Handles all communication with Google's Gemini API.
 This module is used by both OpenAI compatibility layer and native Gemini endpoints.
 """
 import json
+import logging
 import requests
 from fastapi import Response
 from fastapi.responses import StreamingResponse
@@ -80,29 +81,79 @@ def send_gemini_request(payload: dict, is_streaming: bool = False) -> Response:
     final_post_data = json.dumps(final_payload)
 
     # Send the request
-    if is_streaming:
-        resp = requests.post(target_url, data=final_post_data, headers=request_headers, stream=True)
-        return _handle_streaming_response(resp)
-    else:
-        resp = requests.post(target_url, data=final_post_data, headers=request_headers)
-        return _handle_non_streaming_response(resp)
+    try:
+        if is_streaming:
+            resp = requests.post(target_url, data=final_post_data, headers=request_headers, stream=True)
+            return _handle_streaming_response(resp)
+        else:
+            resp = requests.post(target_url, data=final_post_data, headers=request_headers)
+            return _handle_non_streaming_response(resp)
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request to Google API failed: {str(e)}")
+        return Response(
+            content=json.dumps({"error": {"message": f"Request failed: {str(e)}"}}),
+            status_code=500,
+            media_type="application/json"
+        )
+    except Exception as e:
+        logging.error(f"Unexpected error during Google API request: {str(e)}")
+        return Response(
+            content=json.dumps({"error": {"message": f"Unexpected error: {str(e)}"}}),
+            status_code=500,
+            media_type="application/json"
+        )
 
 
 def _handle_streaming_response(resp) -> StreamingResponse:
     """Handle streaming response from Google API."""
     
+    # Check for HTTP errors before starting to stream
+    if resp.status_code != 200:
+        logging.error(f"Google API returned status {resp.status_code}: {resp.text}")
+        error_message = f"Google API error: {resp.status_code}"
+        try:
+            error_data = resp.json()
+            if "error" in error_data:
+                error_message = error_data["error"].get("message", error_message)
+        except:
+            pass
+        
+        # Return error as a streaming response
+        async def error_generator():
+            error_response = {
+                "error": {
+                    "message": error_message,
+                    "type": "invalid_request_error" if resp.status_code == 404 else "api_error",
+                    "code": resp.status_code
+                }
+            }
+            yield f'data: {json.dumps(error_response)}\n\n'.encode('utf-8')
+        
+        response_headers = {
+            "Content-Type": "text/event-stream",
+            "Content-Disposition": "attachment",
+            "Vary": "Origin, X-Origin, Referer",
+            "X-XSS-Protection": "0",
+            "X-Frame-Options": "SAMEORIGIN",
+            "X-Content-Type-Options": "nosniff",
+            "Server": "ESF"
+        }
+        
+        return StreamingResponse(
+            error_generator(),
+            media_type="text/event-stream",
+            headers=response_headers,
+            status_code=resp.status_code
+        )
+    
     async def stream_generator():
         try:
             with resp:
-                resp.raise_for_status()
-                
-                
                 for chunk in resp.iter_lines():
                     if chunk:
                         if not isinstance(chunk, str):
                             chunk = chunk.decode('utf-8')
                             
-                                                    
                         if chunk.startswith('data: '):
                             chunk = chunk[len('data: '):]
                             
@@ -113,18 +164,34 @@ def _handle_streaming_response(resp) -> StreamingResponse:
                                     response_chunk = obj["response"]
                                     response_json = json.dumps(response_chunk, separators=(',', ':'))
                                     response_line = f"data: {response_json}\n\n"
-                                    yield response_line
+                                    yield response_line.encode('utf-8')
                                     await asyncio.sleep(0)
                                 else:
                                     obj_json = json.dumps(obj, separators=(',', ':'))
-                                    yield f"data: {obj_json}\n\n"
+                                    yield f"data: {obj_json}\n\n".encode('utf-8')
                             except json.JSONDecodeError:
                                 continue
                 
         except requests.exceptions.RequestException as e:
-            yield f'data: {{"error": {{"message": "Upstream request failed: {str(e)}"}}}}\n\n'.encode('utf-8')
+            logging.error(f"Streaming request failed: {str(e)}")
+            error_response = {
+                "error": {
+                    "message": f"Upstream request failed: {str(e)}",
+                    "type": "api_error",
+                    "code": 502
+                }
+            }
+            yield f'data: {json.dumps(error_response)}\n\n'.encode('utf-8')
         except Exception as e:
-            yield f'data: {{"error": {{"message": "An unexpected error occurred: {str(e)}"}}}}\n\n'.encode('utf-8')
+            logging.error(f"Unexpected error during streaming: {str(e)}")
+            error_response = {
+                "error": {
+                    "message": f"An unexpected error occurred: {str(e)}",
+                    "type": "api_error",
+                    "code": 500
+                }
+            }
+            yield f'data: {json.dumps(error_response)}\n\n'.encode('utf-8')
 
     response_headers = {
         "Content-Type": "text/event-stream",
@@ -153,20 +220,45 @@ def _handle_non_streaming_response(resp) -> Response:
             google_api_response = json.loads(google_api_response)
             standard_gemini_response = google_api_response.get("response")
             return Response(
-                content=json.dumps(standard_gemini_response), 
-                status_code=200, 
+                content=json.dumps(standard_gemini_response),
+                status_code=200,
                 media_type="application/json; charset=utf-8"
             )
         except (json.JSONDecodeError, AttributeError) as e:
+            logging.error(f"Failed to parse Google API response: {str(e)}")
             return Response(
-                content=resp.content, 
-                status_code=resp.status_code, 
+                content=resp.content,
+                status_code=resp.status_code,
                 media_type=resp.headers.get("Content-Type")
             )
     else:
+        # Log the error details
+        logging.error(f"Google API returned status {resp.status_code}: {resp.text}")
+        
+        # Try to parse error response and provide meaningful error message
+        try:
+            error_data = resp.json()
+            if "error" in error_data:
+                error_message = error_data["error"].get("message", f"API error: {resp.status_code}")
+                error_response = {
+                    "error": {
+                        "message": error_message,
+                        "type": "invalid_request_error" if resp.status_code == 404 else "api_error",
+                        "code": resp.status_code
+                    }
+                }
+                return Response(
+                    content=json.dumps(error_response),
+                    status_code=resp.status_code,
+                    media_type="application/json"
+                )
+        except (json.JSONDecodeError, KeyError):
+            pass
+        
+        # Fallback to original response if we can't parse the error
         return Response(
-            content=resp.content, 
-            status_code=resp.status_code, 
+            content=resp.content,
+            status_code=resp.status_code,
             media_type=resp.headers.get("Content-Type")
         )
 
