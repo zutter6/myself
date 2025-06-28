@@ -103,6 +103,7 @@ def save_credentials(creds, project_id=None):
             expiry_utc = creds.expiry.replace(tzinfo=timezone.utc)
         else:
             expiry_utc = creds.expiry
+        # Keep the existing ISO format for backward compatibility, but ensure it's properly handled during loading
         creds_data["expiry"] = expiry_utc.isoformat()
     
     if project_id:
@@ -153,40 +154,111 @@ def get_credentials():
     
     # Check for credentials file (CREDENTIAL_FILE now includes GOOGLE_APPLICATION_CREDENTIALS path if set)
     if os.path.exists(CREDENTIAL_FILE):
+        # First, check if we have a refresh token - if so, we should always be able to load credentials
         try:
             with open(CREDENTIAL_FILE, "r") as f:
-                creds_data = json.load(f)
+                raw_creds_data = json.load(f)
             
-            # Handle different credential formats
-            if "access_token" in creds_data and "token" not in creds_data:
-                creds_data["token"] = creds_data["access_token"]
-            
-            if "scope" in creds_data and "scopes" not in creds_data:
-                creds_data["scopes"] = creds_data["scope"].split()
-            
-            credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
-            # Mark as environment credentials if GOOGLE_APPLICATION_CREDENTIALS was used
-            credentials_from_env = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-
-            # Try to refresh if expired and refresh token exists
-            if credentials.expired and credentials.refresh_token:
+            # SAFEGUARD: If refresh_token exists, we should always load credentials successfully
+            if "refresh_token" in raw_creds_data and raw_creds_data["refresh_token"]:
+                logging.info("Refresh token found - ensuring credentials load successfully")
+                
                 try:
-                    logging.info("File-based credentials expired, attempting refresh...")
-                    credentials.refresh(GoogleAuthRequest())
-                    logging.info("File-based credentials refreshed successfully")
-                    save_credentials(credentials)
-                except Exception as refresh_error:
-                    logging.warning(f"Failed to refresh file-based credentials: {refresh_error}")
-                    logging.info("Using existing file-based credentials despite refresh failure")
-            elif not credentials.expired:
-                logging.info("File-based credentials are still valid, no refresh needed")
-            elif not credentials.refresh_token:
-                logging.warning("File-based credentials expired but no refresh token available")
-            
-            return credentials
+                    creds_data = raw_creds_data.copy()
+                    
+                    # Handle different credential formats
+                    if "access_token" in creds_data and "token" not in creds_data:
+                        creds_data["token"] = creds_data["access_token"]
+                    
+                    if "scope" in creds_data and "scopes" not in creds_data:
+                        creds_data["scopes"] = creds_data["scope"].split()
+                    
+                    # Handle problematic expiry formats that cause parsing errors
+                    if "expiry" in creds_data:
+                        expiry_str = creds_data["expiry"]
+                        # If expiry has timezone info that causes parsing issues, try to fix it
+                        if isinstance(expiry_str, str) and ("+00:00" in expiry_str or "Z" in expiry_str):
+                            try:
+                                # Try to parse and reformat the expiry to a format Google Credentials can handle
+                                from datetime import datetime
+                                if "+00:00" in expiry_str:
+                                    # Handle ISO format with timezone offset
+                                    parsed_expiry = datetime.fromisoformat(expiry_str)
+                                elif expiry_str.endswith("Z"):
+                                    # Handle ISO format with Z suffix
+                                    parsed_expiry = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+                                else:
+                                    parsed_expiry = datetime.fromisoformat(expiry_str)
+                                
+                                # Convert to UTC timestamp format that Google Credentials library expects
+                                import time
+                                timestamp = parsed_expiry.timestamp()
+                                creds_data["expiry"] = datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%dT%H:%M:%SZ")
+                                logging.info(f"Converted expiry format from '{expiry_str}' to '{creds_data['expiry']}'")
+                            except Exception as expiry_error:
+                                logging.warning(f"Could not parse expiry format '{expiry_str}': {expiry_error}, removing expiry field")
+                                # Remove problematic expiry field - credentials will be treated as expired but still loadable
+                                del creds_data["expiry"]
+                    
+                    credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
+                    # Mark as environment credentials if GOOGLE_APPLICATION_CREDENTIALS was used
+                    credentials_from_env = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+
+                    # Try to refresh if expired and refresh token exists
+                    if credentials.expired and credentials.refresh_token:
+                        try:
+                            logging.info("File-based credentials expired, attempting refresh...")
+                            credentials.refresh(GoogleAuthRequest())
+                            logging.info("File-based credentials refreshed successfully")
+                            save_credentials(credentials)
+                        except Exception as refresh_error:
+                            logging.warning(f"Failed to refresh file-based credentials: {refresh_error}")
+                            logging.info("Using existing file-based credentials despite refresh failure")
+                    elif not credentials.expired:
+                        logging.info("File-based credentials are still valid, no refresh needed")
+                    elif not credentials.refresh_token:
+                        logging.warning("File-based credentials expired but no refresh token available")
+                    
+                    return credentials
+                    
+                except Exception as parsing_error:
+                    # SAFEGUARD: Even if parsing fails, try to create minimal credentials with refresh token
+                    logging.warning(f"Failed to parse credentials normally: {parsing_error}")
+                    logging.info("Attempting to create minimal credentials with refresh token")
+                    
+                    try:
+                        minimal_creds_data = {
+                            "client_id": raw_creds_data.get("client_id", CLIENT_ID),
+                            "client_secret": raw_creds_data.get("client_secret", CLIENT_SECRET),
+                            "refresh_token": raw_creds_data["refresh_token"],
+                            "token_uri": "https://oauth2.googleapis.com/token",
+                        }
+                        
+                        credentials = Credentials.from_authorized_user_info(minimal_creds_data, SCOPES)
+                        credentials_from_env = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+                        
+                        # Force refresh since we don't have a valid token
+                        try:
+                            logging.info("Refreshing minimal credentials...")
+                            credentials.refresh(GoogleAuthRequest())
+                            logging.info("Minimal credentials refreshed successfully")
+                            save_credentials(credentials)
+                            return credentials
+                        except Exception as refresh_error:
+                            logging.error(f"Failed to refresh minimal credentials: {refresh_error}")
+                            # Even if refresh fails, return the credentials - they might still work
+                            return credentials
+                            
+                    except Exception as minimal_error:
+                        logging.error(f"Failed to create minimal credentials: {minimal_error}")
+                        # Fall through to new login as last resort
+            else:
+                logging.warning("No refresh token found in credentials file")
+                # Fall through to new login
+                
         except Exception as e:
-            logging.error(f"Failed to load credentials from file {CREDENTIAL_FILE}: {e}")
-            # Fall through to new login only if credentials are completely unusable
+            logging.error(f"Failed to read credentials file {CREDENTIAL_FILE}: {e}")
+            # Fall through to new login only if file is completely unreadable
 
     client_config = {
         "installed": {
