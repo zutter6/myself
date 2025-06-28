@@ -13,6 +13,15 @@ class OpenAIChatCompletionRequest(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
+    stop: Optional[Union[str, List[str]]] = None
+    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    n: Optional[int] = None
+    seed: Optional[int] = None
+    response_format: Optional[Dict[str, Any]] = None
+    
+    class Config:
+        extra = "allow"  # Allow additional fields not explicitly defined
 
 class OpenAIChatCompletionChoice(BaseModel):
     index: int
