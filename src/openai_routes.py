@@ -129,14 +129,16 @@ async def openai_list_models(username: str = Depends(authenticate_user)):
     
     openai_models = []
     for model in SUPPORTED_MODELS:
+        # Remove "models/" prefix for OpenAI compatibility
+        model_id = model["name"].replace("models/", "")
         openai_models.append({
-            "id": model["name"],
+            "id": model_id,
             "object": "model",
             "created": 1677610602,  # Static timestamp
             "owned_by": "google",
             "permission": [
                 {
-                    "id": "modelperm-" + model["name"].replace("/", "-"),
+                    "id": "modelperm-" + model_id.replace("/", "-"),
                     "object": "model_permission",
                     "created": 1677610602,
                     "allow_create_engine": False,
@@ -150,7 +152,7 @@ async def openai_list_models(username: str = Depends(authenticate_user)):
                     "is_blocking": False
                 }
             ],
-            "root": model["name"],
+            "root": model_id,
             "parent": None
         })
     
