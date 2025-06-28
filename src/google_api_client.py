@@ -115,6 +115,9 @@ def _handle_streaming_response(resp) -> StreamingResponse:
                                     response_line = f"data: {response_json}\n\n"
                                     yield response_line
                                     await asyncio.sleep(0)
+                                else:
+                                    obj_json = json.dumps(obj, separators=(',', ':'))
+                                    yield f"data: {obj_json}\n\n"
                             except json.JSONDecodeError:
                                 continue
                 

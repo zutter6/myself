@@ -2,6 +2,7 @@ import os
 import json
 import base64
 import time
+import logging
 from datetime import datetime
 from fastapi import Request, HTTPException, Depends
 from fastapi.security import HTTPBasic
@@ -195,7 +196,7 @@ def get_credentials():
         prompt="consent",
         include_granted_scopes='true'
     )
-    print(f"\nPlease open this URL in your browser to log in:\n{auth_url}\n")
+    logging.info(f"Please open this URL in your browser to log in: {auth_url}")
     
     server = HTTPServer(("", 8080), _OAuthCallbackHandler)
     server.handle_request()
@@ -220,10 +221,10 @@ def get_credentials():
         credentials = flow.credentials
         credentials_from_env = False  # Mark as file-based credentials
         save_credentials(credentials)
-        print("Authentication successful! Credentials saved.")
+        logging.info("Authentication successful! Credentials saved.")
         return credentials
     except Exception as e:
-        print(f"Authentication failed: {e}")
+        logging.error(f"Authentication failed: {e}")
         return None
     finally:
         oauthlib.oauth2.rfc6749.parameters.validate_token_parameters = original_validate
