@@ -136,15 +136,20 @@ def get_credentials():
             credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
             credentials_from_env = True  # Mark as environment credentials
 
-            if credentials.refresh_token:
+            # Try to refresh if expired and refresh token exists
+            if credentials.expired and credentials.refresh_token:
                 try:
+                    logging.info("Environment credentials expired, attempting refresh...")
                     credentials.refresh(GoogleAuthRequest())
+                    logging.info("Environment credentials refreshed successfully")
                 except Exception as refresh_error:
-                    pass  # Use credentials as-is if refresh fails
+                    logging.warning(f"Failed to refresh environment credentials: {refresh_error}")
+                    logging.info("Using existing environment credentials despite refresh failure")
             
             return credentials
         except Exception as e:
-            pass  # Fall through to file-based credentials
+            logging.warning(f"Failed to load environment credentials: {e}")
+            # Fall through to file-based credentials
     
     # Check for credentials file (CREDENTIAL_FILE now includes GOOGLE_APPLICATION_CREDENTIALS path if set)
     if os.path.exists(CREDENTIAL_FILE):
@@ -152,7 +157,7 @@ def get_credentials():
             with open(CREDENTIAL_FILE, "r") as f:
                 creds_data = json.load(f)
             
-            
+            # Handle different credential formats
             if "access_token" in creds_data and "token" not in creds_data:
                 creds_data["token"] = creds_data["access_token"]
             
@@ -163,16 +168,25 @@ def get_credentials():
             # Mark as environment credentials if GOOGLE_APPLICATION_CREDENTIALS was used
             credentials_from_env = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
 
-            if credentials.refresh_token:
+            # Try to refresh if expired and refresh token exists
+            if credentials.expired and credentials.refresh_token:
                 try:
+                    logging.info("File-based credentials expired, attempting refresh...")
                     credentials.refresh(GoogleAuthRequest())
+                    logging.info("File-based credentials refreshed successfully")
                     save_credentials(credentials)
                 except Exception as refresh_error:
-                    pass  # Use credentials as-is if refresh fails
+                    logging.warning(f"Failed to refresh file-based credentials: {refresh_error}")
+                    logging.info("Using existing file-based credentials despite refresh failure")
+            elif not credentials.expired:
+                logging.info("File-based credentials are still valid, no refresh needed")
+            elif not credentials.refresh_token:
+                logging.warning("File-based credentials expired but no refresh token available")
             
             return credentials
         except Exception as e:
-            pass  # Fall through to new login
+            logging.error(f"Failed to load credentials from file {CREDENTIAL_FILE}: {e}")
+            # Fall through to new login only if credentials are completely unusable
 
     client_config = {
         "installed": {
