@@ -1,0 +1,420 @@
+import os
+import json
+import base64
+import time
+from datetime import datetime
+from fastapi import Request, HTTPException, Depends
+from fastapi.security import HTTPBasic
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request as GoogleAuthRequest
+
+from .utils import get_user_agent, get_client_metadata
+
+# --- Configuration ---
+CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+CLIENT_SECRET = "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"
+SCOPES = [
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
+SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CREDENTIAL_FILE = os.path.join(SCRIPT_DIR, "oauth_creds.json")
+CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
+GEMINI_AUTH_PASSWORD = os.getenv("GEMINI_AUTH_PASSWORD", "123456")  # Default password
+
+# --- Global State ---
+credentials = None
+user_project_id = None
+onboarding_complete = False
+
+security = HTTPBasic()
+
+class _OAuthCallbackHandler(BaseHTTPRequestHandler):
+    auth_code = None
+    def do_GET(self):
+        query_components = parse_qs(urlparse(self.path).query)
+        code = query_components.get("code", [None])[0]
+        if code:
+            _OAuthCallbackHandler.auth_code = code
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<h1>Authentication successful!</h1><p>You can close this window and restart the proxy.</p>")
+        else:
+            self.send_response(400)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<h1>Authentication failed.</h1><p>Please try again.</p>")
+
+def authenticate_user(request: Request):
+    """Authenticate the user with multiple methods."""
+    # Check for API key in query parameters first (for Gemini client compatibility)
+    api_key = request.query_params.get("key")
+    if api_key and api_key == GEMINI_AUTH_PASSWORD:
+        return "api_key_user"
+    
+    # Check for API key in x-goog-api-key header (Google SDK format)
+    goog_api_key = request.headers.get("x-goog-api-key", "")
+    if goog_api_key and goog_api_key == GEMINI_AUTH_PASSWORD:
+        return "goog_api_key_user"
+    
+    # Check for API key in Authorization header (Bearer token format)
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        bearer_token = auth_header[7:]
+        if bearer_token == GEMINI_AUTH_PASSWORD:
+            return "bearer_user"
+    
+    # Check for HTTP Basic Authentication
+    if auth_header.startswith("Basic "):
+        try:
+            encoded_credentials = auth_header[6:]
+            decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
+            username, password = decoded_credentials.split(':', 1)
+            if password == GEMINI_AUTH_PASSWORD:
+                return username
+        except Exception:
+            pass
+    
+    # If none of the authentication methods work
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid authentication credentials. Use HTTP Basic Auth, Bearer token, 'key' query parameter, or 'x-goog-api-key' header.",
+        headers={"WWW-Authenticate": "Basic"},
+    )
+
+def save_credentials(creds, project_id=None):
+    print(f"DEBUG: Saving credentials - Token: {creds.token[:20] if creds.token else 'None'}..., Expired: {creds.expired}, Expiry: {creds.expiry}")
+    
+    creds_data = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "scopes": creds.scopes if creds.scopes else SCOPES,
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+    
+    if creds.expiry:
+        if creds.expiry.tzinfo is None:
+            from datetime import timezone
+            expiry_utc = creds.expiry.replace(tzinfo=timezone.utc)
+        else:
+            expiry_utc = creds.expiry
+        creds_data["expiry"] = expiry_utc.isoformat()
+        print(f"DEBUG: Saving expiry as: {creds_data['expiry']}")
+    else:
+        print("DEBUG: No expiry time available to save")
+    
+    if project_id:
+        creds_data["project_id"] = project_id
+    elif os.path.exists(CREDENTIAL_FILE):
+        try:
+            with open(CREDENTIAL_FILE, "r") as f:
+                existing_data = json.load(f)
+                if "project_id" in existing_data:
+                    creds_data["project_id"] = existing_data["project_id"]
+        except Exception:
+            pass
+    
+    print(f"DEBUG: Final credential data to save: {json.dumps(creds_data, indent=2)}")
+    
+    with open(CREDENTIAL_FILE, "w") as f:
+        json.dump(creds_data, f, indent=2)
+    
+    print("DEBUG: Credentials saved to file")
+
+def get_credentials():
+    """Loads credentials matching gemini-cli OAuth2 flow."""
+    global credentials
+    
+    if credentials and credentials.token:
+        print("Using valid credentials from memory cache.")
+        print(f"DEBUG: Memory credentials - Token: {credentials.token[:20] if credentials.token else 'None'}..., Expired: {credentials.expired}, Expiry: {credentials.expiry}")
+        return credentials
+    else:
+        print("No valid credentials in memory. Loading from disk.")
+    
+    env_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if env_creds and os.path.exists(env_creds):
+        try:
+            with open(env_creds, "r") as f:
+                creds_data = json.load(f)
+            credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
+            print("Loaded credentials from GOOGLE_APPLICATION_CREDENTIALS.")
+            print(f"DEBUG: Env credentials - Token: {credentials.token[:20] if credentials.token else 'None'}..., Expired: {credentials.expired}, Expiry: {credentials.expiry}")
+            
+            if credentials.refresh_token:
+                print("Refreshing environment credentials at startup for reliability...")
+                try:
+                    credentials.refresh(GoogleAuthRequest())
+                    print("Startup token refresh successful for environment credentials.")
+                except Exception as refresh_error:
+                    print(f"Startup token refresh failed for environment credentials: {refresh_error}. Credentials may be stale.")
+            else:
+                print("No refresh token available in environment credentials - using as-is.")
+            
+            return credentials
+        except Exception as e:
+            print(f"Could not load credentials from GOOGLE_APPLICATION_CREDENTIALS: {e}")
+
+    if os.path.exists(CREDENTIAL_FILE):
+        try:
+            with open(CREDENTIAL_FILE, "r") as f:
+                creds_data = json.load(f)
+            
+            print(f"DEBUG: Raw credential data from file: {json.dumps(creds_data, indent=2)}")
+            
+            if "access_token" in creds_data and "token" not in creds_data:
+                creds_data["token"] = creds_data["access_token"]
+                print("DEBUG: Converted access_token to token field")
+            
+            if "scope" in creds_data and "scopes" not in creds_data:
+                creds_data["scopes"] = creds_data["scope"].split()
+                print("DEBUG: Converted scope string to scopes list")
+            
+            credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
+            print("Loaded credentials from cache.")
+            print(f"DEBUG: Loaded credentials - Token: {credentials.token[:20] if credentials.token else 'None'}..., Expired: {credentials.expired}, Expiry: {credentials.expiry}")
+            
+            if credentials.refresh_token:
+                print("Refreshing tokens at startup for reliability...")
+                try:
+                    credentials.refresh(GoogleAuthRequest())
+                    save_credentials(credentials)
+                    print("Startup token refresh successful.")
+                except Exception as refresh_error:
+                    print(f"Startup token refresh failed: {refresh_error}. Credentials may be stale.")
+            else:
+                print("No refresh token available - using cached credentials as-is.")
+            
+            return credentials
+        except Exception as e:
+            print(f"Could not load cached credentials: {e}. Starting new login.")
+
+    client_config = {
+        "installed": {
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
+    
+    flow = Flow.from_client_config(
+        client_config,
+        scopes=SCOPES,
+        redirect_uri="http://localhost:8080"
+    )
+    
+    flow.oauth2session.scope = SCOPES
+    
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        prompt="consent",
+        include_granted_scopes='true'
+    )
+    print(f"\nPlease open this URL in your browser to log in:\n{auth_url}\n")
+    
+    server = HTTPServer(("", 8080), _OAuthCallbackHandler)
+    server.handle_request()
+    
+    auth_code = _OAuthCallbackHandler.auth_code
+    if not auth_code:
+        print("Failed to retrieve authorization code.")
+        return None
+
+    import oauthlib.oauth2.rfc6749.parameters
+    original_validate = oauthlib.oauth2.rfc6749.parameters.validate_token_parameters
+    
+    def patched_validate(params):
+        try:
+            return original_validate(params)
+        except Warning:
+            pass
+    
+    oauthlib.oauth2.rfc6749.parameters.validate_token_parameters = patched_validate
+    
+    try:
+        flow.fetch_token(code=auth_code)
+        credentials = flow.credentials
+        save_credentials(credentials)
+        print("Authentication successful! Credentials saved.")
+        return credentials
+    except Exception as e:
+        print(f"Authentication failed: {e}")
+        return None
+    finally:
+        oauthlib.oauth2.rfc6749.parameters.validate_token_parameters = original_validate
+
+def onboard_user(creds, project_id):
+    """Ensures the user is onboarded, matching gemini-cli setupUser behavior."""
+    global onboarding_complete
+    if onboarding_complete:
+        return
+
+    if creds.expired and creds.refresh_token:
+        print("Credentials expired. Refreshing before onboarding...")
+        try:
+            creds.refresh(GoogleAuthRequest())
+            save_credentials(creds)
+            print("Credentials refreshed successfully.")
+        except Exception as e:
+            print(f"Could not refresh credentials: {e}")
+            raise
+
+    print("Checking user onboarding status...")
+    headers = {
+        "Authorization": f"Bearer {creds.token}",
+        "Content-Type": "application/json",
+        "User-Agent": get_user_agent(),
+    }
+    
+    load_assist_payload = {
+        "cloudaicompanionProject": project_id,
+        "metadata": get_client_metadata(project_id),
+    }
+    
+    try:
+        import requests
+        resp = requests.post(
+            f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist",
+            data=json.dumps(load_assist_payload),
+            headers=headers,
+        )
+        resp.raise_for_status()
+        load_data = resp.json()
+        
+        tier = None
+        if load_data.get("currentTier"):
+            tier = load_data["currentTier"]
+            print("User is already onboarded.")
+        else:
+            for allowed_tier in load_data.get("allowedTiers", []):
+                if allowed_tier.get("isDefault"):
+                    tier = allowed_tier
+                    break
+            
+            if not tier:
+                tier = {
+                    "name": "",
+                    "description": "",
+                    "id": "legacy-tier",
+                    "userDefinedCloudaicompanionProject": True,
+                }
+
+        if tier.get("userDefinedCloudaicompanionProject") and not project_id:
+            raise ValueError("This account requires setting the GOOGLE_CLOUD_PROJECT env var.")
+
+        if load_data.get("currentTier"):
+            onboarding_complete = True
+            return
+
+        print(f"Onboarding user to tier: {tier.get('name', 'legacy-tier')}")
+        onboard_req_payload = {
+            "tierId": tier.get("id"),
+            "cloudaicompanionProject": project_id,
+            "metadata": get_client_metadata(project_id),
+        }
+
+        while True:
+            onboard_resp = requests.post(
+                f"{CODE_ASSIST_ENDPOINT}/v1internal:onboardUser",
+                data=json.dumps(onboard_req_payload),
+                headers=headers,
+            )
+            onboard_resp.raise_for_status()
+            lro_data = onboard_resp.json()
+
+            if lro_data.get("done"):
+                print("Onboarding successful.")
+                onboarding_complete = True
+                break
+            
+            print("Onboarding in progress, waiting 5 seconds...")
+            time.sleep(5)
+
+    except requests.exceptions.HTTPError as e:
+        print(f"Error during onboarding: {e.response.text}")
+        raise
+
+def get_user_project_id(creds):
+    """Gets the user's project ID matching gemini-cli setupUser logic."""
+    global user_project_id
+    if user_project_id:
+        return user_project_id
+
+    env_project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    if env_project_id:
+        user_project_id = env_project_id
+        print(f"Using project ID from GOOGLE_CLOUD_PROJECT: {user_project_id}")
+        save_credentials(creds, user_project_id)
+        return user_project_id
+
+    gemini_env_project_id = os.getenv("GEMINI_PROJECT_ID")
+    if gemini_env_project_id:
+        user_project_id = gemini_env_project_id
+        print(f"Using project ID from GEMINI_PROJECT_ID: {user_project_id}")
+        save_credentials(creds, user_project_id)
+        return user_project_id
+
+    if os.path.exists(CREDENTIAL_FILE):
+        try:
+            with open(CREDENTIAL_FILE, "r") as f:
+                creds_data = json.load(f)
+                cached_project_id = creds_data.get("project_id")
+                if cached_project_id:
+                    user_project_id = cached_project_id
+                    print(f"Loaded project ID from cache: {user_project_id}")
+                    return user_project_id
+        except Exception as e:
+            print(f"Could not load project ID from cache: {e}")
+
+    print("Project ID not found in environment or cache. Probing for user project ID...")
+    
+    if creds.expired and creds.refresh_token:
+        print("Credentials expired. Refreshing before project ID probe...")
+        try:
+            creds.refresh(GoogleAuthRequest())
+            save_credentials(creds)
+            print("Credentials refreshed successfully.")
+        except Exception as e:
+            print(f"Could not refresh credentials: {e}")
+            raise
+    
+    headers = {
+        "Authorization": f"Bearer {creds.token}",
+        "Content-Type": "application/json",
+        "User-Agent": get_user_agent(),
+    }
+    
+    probe_payload = {
+        "metadata": get_client_metadata(),
+    }
+
+    try:
+        import requests
+        resp = requests.post(
+            f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist",
+            data=json.dumps(probe_payload),
+            headers=headers,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        user_project_id = data.get("cloudaicompanionProject")
+        if not user_project_id:
+            raise ValueError("Could not find 'cloudaicompanionProject' in loadCodeAssist response.")
+        print(f"Successfully fetched user project ID: {user_project_id}")
+        
+        save_credentials(creds, user_project_id)
+        print("Project ID saved to credential file for future use.")
+        
+        return user_project_id
+    except requests.exceptions.HTTPError as e:
+        print(f"Error fetching project ID: {e.response.text}")
+        raise
