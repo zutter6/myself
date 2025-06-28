@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  geminicli2api:
+    build: .
+    ports:
+      - "${PORT:-8888}:${PORT:-8888}"
+    environment:
+      - GEMINI_AUTH_PASSWORD=${GEMINI_AUTH_PASSWORD:-your_password_here}
+      - GEMINI_CREDENTIALS=${GEMINI_CREDENTIALS:-}
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-}
+      - HOST=${HOST:-0.0.0.0}
+      - PORT=${PORT:-8888}
+    volumes:
+      # Optional: Mount credentials file if using file-based auth
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:/app/${GOOGLE_APPLICATION_CREDENTIALS:-oauth_creds.json}:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -f http://localhost:${PORT:-8888}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
