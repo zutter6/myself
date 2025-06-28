@@ -37,20 +37,57 @@ app.add_middleware(
 async def startup_event():
     try:
         logging.info("Starting Gemini proxy server...")
-        creds = get_credentials()
-        if creds:
+        
+        # Check if credentials exist
+        import os
+        from .config import CREDENTIAL_FILE
+        
+        env_creds_json = os.getenv("GEMINI_CREDENTIALS")
+        creds_file_exists = os.path.exists(CREDENTIAL_FILE)
+        
+        if env_creds_json or creds_file_exists:
             try:
-                proj_id = get_user_project_id(creds)
-                if proj_id:
-                    onboard_user(creds, proj_id)
-                    logging.info(f"Successfully onboarded with project ID: {proj_id}")
-                logging.info("Gemini proxy server started successfully")
-                logging.info("Authentication required - Password: see .env file")
+                # Try to load existing credentials without OAuth flow first
+                creds = get_credentials(allow_oauth_flow=False)
+                if creds:
+                    try:
+                        proj_id = get_user_project_id(creds)
+                        if proj_id:
+                            onboard_user(creds, proj_id)
+                            logging.info(f"Successfully onboarded with project ID: {proj_id}")
+                        logging.info("Gemini proxy server started successfully")
+                        logging.info("Authentication required - Password: see .env file")
+                    except Exception as e:
+                        logging.error(f"Setup failed: {str(e)}")
+                        logging.warning("Server started but may not function properly until setup issues are resolved.")
+                else:
+                    logging.warning("Credentials file exists but could not be loaded. Server started - authentication will be required on first request.")
             except Exception as e:
-                logging.error(f"Setup failed: {str(e)}")
-                logging.warning("Server started but may not function properly until setup issues are resolved.")
+                logging.error(f"Credential loading error: {str(e)}")
+                logging.warning("Server started but credentials need to be set up.")
         else:
-            logging.error("Could not obtain credentials. Please authenticate and restart the server.")
+            # No credentials found - prompt user to authenticate
+            logging.info("No credentials found. Starting OAuth authentication flow...")
+            try:
+                creds = get_credentials(allow_oauth_flow=True)
+                if creds:
+                    try:
+                        proj_id = get_user_project_id(creds)
+                        if proj_id:
+                            onboard_user(creds, proj_id)
+                            logging.info(f"Successfully onboarded with project ID: {proj_id}")
+                        logging.info("Gemini proxy server started successfully")
+                    except Exception as e:
+                        logging.error(f"Setup failed: {str(e)}")
+                        logging.warning("Server started but may not function properly until setup issues are resolved.")
+                else:
+                    logging.error("Authentication failed. Server started but will not function until credentials are provided.")
+            except Exception as e:
+                logging.error(f"Authentication error: {str(e)}")
+                logging.warning("Server started but authentication failed.")
+        
+        logging.info("Authentication required - Password: see .env file")
+        
     except Exception as e:
         logging.error(f"Startup error: {str(e)}")
         logging.warning("Server may not function properly.")

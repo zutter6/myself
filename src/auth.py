@@ -135,7 +135,7 @@ def save_credentials(creds, project_id=None):
         json.dump(creds_data, f, indent=2)
     
 
-def get_credentials():
+def get_credentials(allow_oauth_flow=True):
     """Loads credentials matching gemini-cli OAuth2 flow."""
     global credentials, credentials_from_env, user_project_id
     
@@ -365,6 +365,11 @@ def get_credentials():
             logging.error(f"Failed to read credentials file {CREDENTIAL_FILE}: {e}")
             # Fall through to new login only if file is completely unreadable
 
+    # Only start OAuth flow if explicitly allowed
+    if not allow_oauth_flow:
+        logging.info("OAuth flow not allowed - returning None (credentials will be required on first request)")
+        return None
+
     client_config = {
         "installed": {
             "client_id": CLIENT_ID,
@@ -387,6 +392,12 @@ def get_credentials():
         prompt="consent",
         include_granted_scopes='true'
     )
+    print(f"\n{'='*80}")
+    print(f"AUTHENTICATION REQUIRED")
+    print(f"{'='*80}")
+    print(f"Please open this URL in your browser to log in:")
+    print(f"{auth_url}")
+    print(f"{'='*80}\n")
     logging.info(f"Please open this URL in your browser to log in: {auth_url}")
     
     server = HTTPServer(("", 8080), _OAuthCallbackHandler)
