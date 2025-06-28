@@ -84,8 +84,21 @@ def authenticate_user(request: Request):
 def save_credentials(creds, project_id=None):
     global credentials_from_env
     
-    # Don't save to file if credentials came from environment variable
+    # Don't save credentials to file if they came from environment variable,
+    # but still save project_id if provided and no file exists or file lacks project_id
     if credentials_from_env:
+        if project_id and os.path.exists(CREDENTIAL_FILE):
+            try:
+                with open(CREDENTIAL_FILE, "r") as f:
+                    existing_data = json.load(f)
+                # Only update project_id if it's missing from the file
+                if "project_id" not in existing_data:
+                    existing_data["project_id"] = project_id
+                    with open(CREDENTIAL_FILE, "w") as f:
+                        json.dump(existing_data, f, indent=2)
+                    logging.info(f"Added project_id {project_id} to existing credential file")
+            except Exception as e:
+                logging.warning(f"Could not update project_id in credential file: {e}")
         return
     
     creds_data = {
@@ -180,6 +193,12 @@ def get_credentials():
                     credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
                     credentials_from_env = True  # Mark as environment credentials
 
+                    # Extract project_id from environment credentials if available
+                    if "project_id" in raw_env_creds_data:
+                        global user_project_id
+                        user_project_id = raw_env_creds_data["project_id"]
+                        logging.info(f"Extracted project_id from environment credentials: {user_project_id}")
+
                     # Try to refresh if expired and refresh token exists
                     if credentials.expired and credentials.refresh_token:
                         try:
@@ -211,6 +230,12 @@ def get_credentials():
                         
                         credentials = Credentials.from_authorized_user_info(minimal_creds_data, SCOPES)
                         credentials_from_env = True  # Mark as environment credentials
+                        
+                        # Extract project_id from environment credentials if available
+                        if "project_id" in raw_env_creds_data:
+                            global user_project_id
+                            user_project_id = raw_env_creds_data["project_id"]
+                            logging.info(f"Extracted project_id from minimal environment credentials: {user_project_id}")
                         
                         # Force refresh since we don't have a valid token
                         try:
@@ -486,29 +511,41 @@ def get_user_project_id(creds):
     if user_project_id:
         return user_project_id
 
+    # Priority 1: Check environment variable first
     env_project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
     if env_project_id:
+        logging.info(f"Using project ID from GOOGLE_CLOUD_PROJECT environment variable: {env_project_id}")
         user_project_id = env_project_id
         save_credentials(creds, user_project_id)
         return user_project_id
 
+    # Priority 2: Check cached project ID in credential file
     if os.path.exists(CREDENTIAL_FILE):
         try:
             with open(CREDENTIAL_FILE, "r") as f:
                 creds_data = json.load(f)
                 cached_project_id = creds_data.get("project_id")
                 if cached_project_id:
+                    logging.info(f"Using cached project ID from credential file: {cached_project_id}")
                     user_project_id = cached_project_id
                     return user_project_id
         except Exception as e:
-            pass
+            logging.warning(f"Could not read project_id from credential file: {e}")
 
+    # Priority 3: Make API call to discover project ID
+    # Ensure we have valid credentials for the API call
     if creds.expired and creds.refresh_token:
         try:
+            logging.info("Refreshing credentials before project ID discovery...")
             creds.refresh(GoogleAuthRequest())
             save_credentials(creds)
+            logging.info("Credentials refreshed successfully for project ID discovery")
         except Exception as e:
-            raise Exception(f"Failed to refresh credentials while getting project ID: {str(e)}")
+            logging.error(f"Failed to refresh credentials while getting project ID: {e}")
+            # Continue with existing credentials - they might still work
+    
+    if not creds.token:
+        raise Exception("No valid access token available for project ID discovery")
     
     headers = {
         "Authorization": f"Bearer {creds.token}",
@@ -522,6 +559,7 @@ def get_user_project_id(creds):
 
     try:
         import requests
+        logging.info("Attempting to discover project ID via API call...")
         resp = requests.post(
             f"{CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist",
             data=json.dumps(probe_payload),
@@ -529,12 +567,20 @@ def get_user_project_id(creds):
         )
         resp.raise_for_status()
         data = resp.json()
-        user_project_id = data.get("cloudaicompanionProject")
-        if not user_project_id:
+        discovered_project_id = data.get("cloudaicompanionProject")
+        if not discovered_project_id:
             raise ValueError("Could not find 'cloudaicompanionProject' in loadCodeAssist response.")
 
+        logging.info(f"Discovered project ID via API: {discovered_project_id}")
+        user_project_id = discovered_project_id
         save_credentials(creds, user_project_id)
         
         return user_project_id
     except requests.exceptions.HTTPError as e:
-        raise
+        logging.error(f"HTTP error during project ID discovery: {e}")
+        if hasattr(e, 'response') and e.response:
+            logging.error(f"Response status: {e.response.status_code}, body: {e.response.text}")
+        raise Exception(f"Failed to discover project ID via API: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error during project ID discovery: {e}")
+        raise Exception(f"Failed to discover project ID: {e}")
