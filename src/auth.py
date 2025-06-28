@@ -132,24 +132,106 @@ def get_credentials():
     # Check for credentials in environment variable (JSON string)
     env_creds_json = os.getenv("GEMINI_CREDENTIALS")
     if env_creds_json:
+        # First, check if we have a refresh token - if so, we should always be able to load credentials
         try:
-            creds_data = json.loads(env_creds_json)
-            credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
-            credentials_from_env = True  # Mark as environment credentials
-
-            # Try to refresh if expired and refresh token exists
-            if credentials.expired and credentials.refresh_token:
-                try:
-                    logging.info("Environment credentials expired, attempting refresh...")
-                    credentials.refresh(GoogleAuthRequest())
-                    logging.info("Environment credentials refreshed successfully")
-                except Exception as refresh_error:
-                    logging.warning(f"Failed to refresh environment credentials: {refresh_error}")
-                    logging.info("Using existing environment credentials despite refresh failure")
+            raw_env_creds_data = json.loads(env_creds_json)
             
-            return credentials
+            # SAFEGUARD: If refresh_token exists, we should always load credentials successfully
+            if "refresh_token" in raw_env_creds_data and raw_env_creds_data["refresh_token"]:
+                logging.info("Environment refresh token found - ensuring credentials load successfully")
+                
+                try:
+                    creds_data = raw_env_creds_data.copy()
+                    
+                    # Handle different credential formats
+                    if "access_token" in creds_data and "token" not in creds_data:
+                        creds_data["token"] = creds_data["access_token"]
+                    
+                    if "scope" in creds_data and "scopes" not in creds_data:
+                        creds_data["scopes"] = creds_data["scope"].split()
+                    
+                    # Handle problematic expiry formats that cause parsing errors
+                    if "expiry" in creds_data:
+                        expiry_str = creds_data["expiry"]
+                        # If expiry has timezone info that causes parsing issues, try to fix it
+                        if isinstance(expiry_str, str) and ("+00:00" in expiry_str or "Z" in expiry_str):
+                            try:
+                                # Try to parse and reformat the expiry to a format Google Credentials can handle
+                                from datetime import datetime
+                                if "+00:00" in expiry_str:
+                                    # Handle ISO format with timezone offset
+                                    parsed_expiry = datetime.fromisoformat(expiry_str)
+                                elif expiry_str.endswith("Z"):
+                                    # Handle ISO format with Z suffix
+                                    parsed_expiry = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+                                else:
+                                    parsed_expiry = datetime.fromisoformat(expiry_str)
+                                
+                                # Convert to UTC timestamp format that Google Credentials library expects
+                                import time
+                                timestamp = parsed_expiry.timestamp()
+                                creds_data["expiry"] = datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%dT%H:%M:%SZ")
+                                logging.info(f"Converted environment expiry format from '{expiry_str}' to '{creds_data['expiry']}'")
+                            except Exception as expiry_error:
+                                logging.warning(f"Could not parse environment expiry format '{expiry_str}': {expiry_error}, removing expiry field")
+                                # Remove problematic expiry field - credentials will be treated as expired but still loadable
+                                del creds_data["expiry"]
+                    
+                    credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
+                    credentials_from_env = True  # Mark as environment credentials
+
+                    # Try to refresh if expired and refresh token exists
+                    if credentials.expired and credentials.refresh_token:
+                        try:
+                            logging.info("Environment credentials expired, attempting refresh...")
+                            credentials.refresh(GoogleAuthRequest())
+                            logging.info("Environment credentials refreshed successfully")
+                        except Exception as refresh_error:
+                            logging.warning(f"Failed to refresh environment credentials: {refresh_error}")
+                            logging.info("Using existing environment credentials despite refresh failure")
+                    elif not credentials.expired:
+                        logging.info("Environment credentials are still valid, no refresh needed")
+                    elif not credentials.refresh_token:
+                        logging.warning("Environment credentials expired but no refresh token available")
+                    
+                    return credentials
+                    
+                except Exception as parsing_error:
+                    # SAFEGUARD: Even if parsing fails, try to create minimal credentials with refresh token
+                    logging.warning(f"Failed to parse environment credentials normally: {parsing_error}")
+                    logging.info("Attempting to create minimal environment credentials with refresh token")
+                    
+                    try:
+                        minimal_creds_data = {
+                            "client_id": raw_env_creds_data.get("client_id", CLIENT_ID),
+                            "client_secret": raw_env_creds_data.get("client_secret", CLIENT_SECRET),
+                            "refresh_token": raw_env_creds_data["refresh_token"],
+                            "token_uri": "https://oauth2.googleapis.com/token",
+                        }
+                        
+                        credentials = Credentials.from_authorized_user_info(minimal_creds_data, SCOPES)
+                        credentials_from_env = True  # Mark as environment credentials
+                        
+                        # Force refresh since we don't have a valid token
+                        try:
+                            logging.info("Refreshing minimal environment credentials...")
+                            credentials.refresh(GoogleAuthRequest())
+                            logging.info("Minimal environment credentials refreshed successfully")
+                            return credentials
+                        except Exception as refresh_error:
+                            logging.error(f"Failed to refresh minimal environment credentials: {refresh_error}")
+                            # Even if refresh fails, return the credentials - they might still work
+                            return credentials
+                            
+                    except Exception as minimal_error:
+                        logging.error(f"Failed to create minimal environment credentials: {minimal_error}")
+                        # Fall through to file-based credentials
+            else:
+                logging.warning("No refresh token found in environment credentials")
+                # Fall through to file-based credentials
+                
         except Exception as e:
-            logging.warning(f"Failed to load environment credentials: {e}")
+            logging.error(f"Failed to parse environment credentials JSON: {e}")
             # Fall through to file-based credentials
     
     # Check for credentials file (CREDENTIAL_FILE now includes GOOGLE_APPLICATION_CREDENTIALS path if set)
