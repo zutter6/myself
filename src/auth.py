@@ -506,15 +506,18 @@ def onboard_user(creds, project_id):
 def get_user_project_id(creds):
     """Gets the user's project ID matching gemini-cli setupUser logic."""
     global user_project_id
-    if user_project_id:
-        return user_project_id
-
-    # Priority 1: Check environment variable first
+    
+    # Priority 1: Check environment variable first (always check, even if user_project_id is set)
     env_project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
     if env_project_id:
         logging.info(f"Using project ID from GOOGLE_CLOUD_PROJECT environment variable: {env_project_id}")
         user_project_id = env_project_id
         save_credentials(creds, user_project_id)
+        return user_project_id
+    
+    # If we already have a cached project_id and no env var override, use it
+    if user_project_id:
+        logging.info(f"Using cached project ID: {user_project_id}")
         return user_project_id
 
     # Priority 2: Check cached project ID in credential file
