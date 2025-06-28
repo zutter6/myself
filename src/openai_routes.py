@@ -160,21 +160,3 @@ async def openai_list_models(username: str = Depends(authenticate_user)):
     }
 
 
-# Test endpoint for debugging (can be removed in production)
-@router.post("/v1/test")
-async def openai_test_endpoint(
-    request: OpenAIChatCompletionRequest, 
-    username: str = Depends(authenticate_user)
-):
-    """
-    Test endpoint for debugging OpenAI transformations.
-    """
-    
-    # Transform the request and return the result for inspection
-    gemini_request_data = openai_request_to_gemini(request)
-    
-    return {
-        "original_openai_request": request.dict(),
-        "transformed_gemini_request": gemini_request_data,
-        "message": "Transformation successful"
-    }
