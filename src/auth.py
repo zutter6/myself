@@ -22,6 +22,7 @@ from .config import (
 credentials = None
 user_project_id = None
 onboarding_complete = False
+credentials_from_env = False  # Track if credentials came from environment variable
 
 security = HTTPBasic()
 
@@ -80,6 +81,11 @@ def authenticate_user(request: Request):
     )
 
 def save_credentials(creds, project_id=None):
+    global credentials_from_env
+    
+    # Don't save to file if credentials came from environment variable
+    if credentials_from_env:
+        return
     
     creds_data = {
         "client_id": CLIENT_ID,
@@ -116,17 +122,18 @@ def save_credentials(creds, project_id=None):
 
 def get_credentials():
     """Loads credentials matching gemini-cli OAuth2 flow."""
-    global credentials
+    global credentials, credentials_from_env
     
     if credentials and credentials.token:
         return credentials
     
-    env_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if env_creds and os.path.exists(env_creds):
+    # Check for credentials in environment variable (JSON string)
+    env_creds_json = os.getenv("GEMINI_CREDENTIALS")
+    if env_creds_json:
         try:
-            with open(env_creds, "r") as f:
-                creds_data = json.load(f)
+            creds_data = json.loads(env_creds_json)
             credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
+            credentials_from_env = True  # Mark as environment credentials
 
             if credentials.refresh_token:
                 try:
@@ -137,7 +144,8 @@ def get_credentials():
             return credentials
         except Exception as e:
             pass  # Fall through to file-based credentials
-
+    
+    # Check for credentials file (CREDENTIAL_FILE now includes GOOGLE_APPLICATION_CREDENTIALS path if set)
     if os.path.exists(CREDENTIAL_FILE):
         try:
             with open(CREDENTIAL_FILE, "r") as f:
@@ -151,6 +159,8 @@ def get_credentials():
                 creds_data["scopes"] = creds_data["scope"].split()
             
             credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
+            # Mark as environment credentials if GOOGLE_APPLICATION_CREDENTIALS was used
+            credentials_from_env = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
 
             if credentials.refresh_token:
                 try:
@@ -208,6 +218,7 @@ def get_credentials():
     try:
         flow.fetch_token(code=auth_code)
         credentials = flow.credentials
+        credentials_from_env = False  # Mark as file-based credentials
         save_credentials(credentials)
         print("Authentication successful! Credentials saved.")
         return credentials
@@ -309,12 +320,6 @@ def get_user_project_id(creds):
     env_project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
     if env_project_id:
         user_project_id = env_project_id
-        save_credentials(creds, user_project_id)
-        return user_project_id
-
-    gemini_env_project_id = os.getenv("GEMINI_PROJECT_ID")
-    if gemini_env_project_id:
-        user_project_id = gemini_env_project_id
         save_credentials(creds, user_project_id)
         return user_project_id
 

@@ -48,5 +48,11 @@ async def handle_preflight(request: Request, full_path: str):
         }
     )
 
+# Health check endpoint for Docker/Hugging Face
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for container orchestration."""
+    return {"status": "healthy", "service": "geminicli2api"}
+
 app.include_router(openai_router)
 app.include_router(gemini_router)
