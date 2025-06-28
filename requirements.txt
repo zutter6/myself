@@ -1,7 +1,6 @@
 fastapi
 uvicorn
-google-auth
-google-auth-oauthlib
 requests
-ijson
 python-dotenv
+google-auth-oauthlib
+ijson
