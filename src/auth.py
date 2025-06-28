@@ -137,7 +137,7 @@ def save_credentials(creds, project_id=None):
 
 def get_credentials():
     """Loads credentials matching gemini-cli OAuth2 flow."""
-    global credentials, credentials_from_env
+    global credentials, credentials_from_env, user_project_id
     
     if credentials and credentials.token:
         return credentials
@@ -195,7 +195,6 @@ def get_credentials():
 
                     # Extract project_id from environment credentials if available
                     if "project_id" in raw_env_creds_data:
-                        global user_project_id
                         user_project_id = raw_env_creds_data["project_id"]
                         logging.info(f"Extracted project_id from environment credentials: {user_project_id}")
 
@@ -233,7 +232,6 @@ def get_credentials():
                         
                         # Extract project_id from environment credentials if available
                         if "project_id" in raw_env_creds_data:
-                            global user_project_id
                             user_project_id = raw_env_creds_data["project_id"]
                             logging.info(f"Extracted project_id from minimal environment credentials: {user_project_id}")
                         
