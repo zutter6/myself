@@ -3,4 +3,4 @@ uvicorn
 requests
 python-dotenv
 google-auth-oauthlib
-ijson
+asyncio

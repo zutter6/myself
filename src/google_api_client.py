@@ -11,6 +11,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from .auth import get_credentials, save_credentials, get_user_project_id, onboard_user
 from .utils import get_user_agent
 from .config import CODE_ASSIST_ENDPOINT, DEFAULT_SAFETY_SETTINGS
+import asyncio
 
 
 def send_gemini_request(payload: dict, is_streaming: bool = False) -> Response:
@@ -89,7 +90,6 @@ def send_gemini_request(payload: dict, is_streaming: bool = False) -> Response:
 
 def _handle_streaming_response(resp) -> StreamingResponse:
     """Handle streaming response from Google API."""
-    import asyncio
     
     async def stream_generator():
         try:
