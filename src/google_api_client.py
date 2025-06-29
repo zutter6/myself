@@ -299,9 +299,16 @@ def build_gemini_payload_from_native(native_request: dict, model_from_path: str)
     Build a Gemini API payload from a native Gemini request.
     This is used for direct Gemini API calls.
     """
-    # Add default safety settings if not provided
-    if "safetySettings" not in native_request:
-        native_request["safetySettings"] = DEFAULT_SAFETY_SETTINGS
+    native_request["safetySettings"] = DEFAULT_SAFETY_SETTINGS
+    
+    if "generationConfig" not in native_request:
+        native_request["generationConfig"] = {}
+    
+    if "thinkingConfig" not in native_request["generationConfig"]:
+        native_request["generationConfig"]["thinkingConfig"] = {}
+    
+    native_request["generationConfig"]["thinkingConfig"]["includeThoughts"] = True
+    native_request["generationConfig"]["thinkingConfig"]["thinkingBudget"] = -1
     
     return {
         "model": model_from_path,
