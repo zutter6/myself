@@ -20,6 +20,8 @@ A FastAPI-based proxy server that converts the Gemini CLI tool into both OpenAI-
 - **Streaming Support**: Real-time streaming responses for both API formats
 - **Multimodal Support**: Text and image inputs
 - **Authentication**: Multiple auth methods (Bearer, Basic, API key)
+- **Google Search Grounding**: Enable Google Search for grounded responses using `-search` models.
+- **Thinking/Reasoning Control**: Control Gemini's thinking process with `-nothinking` and `-maxthinking` models.
 - **Docker Ready**: Containerized for easy deployment
 - **Hugging Face Spaces**: Ready for deployment on Hugging Face
 
@@ -127,15 +129,19 @@ client = openai.OpenAI(
 
 # Use like normal OpenAI API
 response = client.chat.completions.create(
-    model="gemini-2.0-flash-exp",
+    model="gemini-2.5-pro-maxthinking",
     messages=[
-        {"role": "user", "content": "Hello, how are you?"}
+        {"role": "user", "content": "Explain the theory of relativity in simple terms."}
     ],
     stream=True
 )
 
+# Separate reasoning from the final answer
 for chunk in response:
-    print(chunk.choices[0].delta.content, end="")
+    if chunk.choices[0].delta.reasoning_content:
+        print(f"Thinking: {chunk.choices[0].delta.reasoning_content}")
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="")
 ```
 
 ## 🔧 Native Gemini API Example
@@ -151,14 +157,18 @@ headers = {
 data = {
     "contents": [
         {
-            "role": "user", 
-            "parts": [{"text": "Hello, how are you?"}]
+            "role": "user",
+            "parts": [{"text": "Explain the theory of relativity in simple terms."}]
         }
-    ]
+    ],
+    "thinkingConfig": {
+        "thinkingBudget": 32768,
+        "includeThoughts": True
+    }
 }
 
 response = requests.post(
-    "http://localhost:8888/v1beta/models/gemini-2.0-flash-exp:generateContent",  # or 7860 for HF
+    "http://localhost:8888/v1beta/models/gemini-2.5-pro:generateContent",  # or 7860 for HF
     headers=headers,
     json=data
 )
@@ -168,11 +178,22 @@ print(response.json())
 
 ## 🎯 Supported Models
 
-- `gemini-2.0-flash-exp`
-- `gemini-1.5-flash`
-- `gemini-1.5-flash-8b`
+### Base Models
+- `gemini-2.5-pro`
+- `gemini-2.5-flash`
 - `gemini-1.5-pro`
+- `gemini-1.5-flash`
 - `gemini-1.0-pro`
+
+### Model Variants
+The proxy automatically creates variants for `gemini-2.5-pro` and `gemini-2.5-flash` models:
+
+- **`-search`**: Appends `-search` to a model name to enable Google Search grounding.
+  - Example: `gemini-2.5-pro-search`
+- **`-nothinking`**: Appends `-nothinking` to minimize reasoning steps.
+  - Example: `gemini-2.5-flash-nothinking`
+- **`-maxthinking`**: Appends `-maxthinking` to maximize the reasoning budget.
+  - Example: `gemini-2.5-pro-maxthinking`
 
 ## 📄 License
 
