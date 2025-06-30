@@ -182,7 +182,9 @@ def _generate_combined_variants():
     return combined_models
 
 # Supported Models (includes base models, search variants, and thinking variants)
-SUPPORTED_MODELS = BASE_MODELS + _generate_search_variants() + _generate_thinking_variants()
+# Combine all models and then sort them by name to group variants together
+all_models = BASE_MODELS + _generate_search_variants() + _generate_thinking_variants()
+SUPPORTED_MODELS = sorted(all_models, key=lambda x: x['name'])
 
 # Helper function to get base model name from any variant
 def get_base_model_name(model_name):
