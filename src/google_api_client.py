@@ -11,7 +11,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 
 from .auth import get_credentials, save_credentials, get_user_project_id, onboard_user
 from .utils import get_user_agent
-from .config import CODE_ASSIST_ENDPOINT, DEFAULT_SAFETY_SETTINGS
+from .config import CODE_ASSIST_ENDPOINT, DEFAULT_SAFETY_SETTINGS, get_base_model_name, is_search_model
 import asyncio
 
 
@@ -310,7 +310,15 @@ def build_gemini_payload_from_native(native_request: dict, model_from_path: str)
     native_request["generationConfig"]["thinkingConfig"]["includeThoughts"] = True
     native_request["generationConfig"]["thinkingConfig"]["thinkingBudget"] = -1
     
+    # Add Google Search grounding for search models
+    if is_search_model(model_from_path):
+        if "tools" not in native_request:
+            native_request["tools"] = []
+        # Add googleSearch tool if not already present
+        if not any(tool.get("googleSearch") for tool in native_request["tools"]):
+            native_request["tools"].append({"googleSearch": {}})
+    
     return {
-        "model": model_from_path,
+        "model": get_base_model_name(model_from_path),  # Use base model name for API call
         "request": native_request
     }

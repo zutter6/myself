@@ -8,7 +8,7 @@ import uuid
 from typing import Dict, Any
 
 from .models import OpenAIChatCompletionRequest, OpenAIChatCompletionResponse
-from .config import DEFAULT_SAFETY_SETTINGS
+from .config import DEFAULT_SAFETY_SETTINGS, is_search_model, get_base_model_name
 
 
 def openai_request_to_gemini(openai_request: OpenAIChatCompletionRequest) -> Dict[str, Any]:
@@ -91,12 +91,19 @@ def openai_request_to_gemini(openai_request: OpenAIChatCompletionRequest) -> Dic
         if openai_request.response_format.get("type") == "json_object":
             generation_config["responseMimeType"] = "application/json"
 
-    return {
+    # Build the request payload
+    request_payload = {
         "contents": contents,
         "generationConfig": generation_config,
         "safetySettings": DEFAULT_SAFETY_SETTINGS,
-        "model": openai_request.model
+        "model": get_base_model_name(openai_request.model)  # Use base model name for API call
     }
+    
+    # Add Google Search grounding for search models
+    if is_search_model(openai_request.model):
+        request_payload["tools"] = [{"googleSearch": {}}]
+    
+    return request_payload
 
 
 def gemini_response_to_openai(gemini_response: Dict[str, Any], model: str) -> Dict[str, Any]:

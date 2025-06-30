@@ -35,8 +35,8 @@ DEFAULT_SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"}
 ]
 
-# Supported Models (for /v1beta/models endpoint)
-SUPPORTED_MODELS = [
+# Base Models (without search variants)
+BASE_MODELS = [
     {
         "name": "models/gemini-2.5-pro-preview-05-06",
         "version": "001",
@@ -93,7 +93,7 @@ SUPPORTED_MODELS = [
         "name": "models/gemini-2.5-flash-preview-04-17",
         "version": "001",
         "displayName": "Gemini 2.5 Flash Preview 04-17",
-        "description": "Preview version of Gemini 2.5 Flash from May 20th",
+        "description": "Preview version of Gemini 2.5 Flash from April 17th",
         "inputTokenLimit": 1048576,
         "outputTokenLimit": 65535,
         "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
@@ -116,3 +116,32 @@ SUPPORTED_MODELS = [
         "topK": 64
     }
 ]
+
+# Generate search variants for applicable models
+def _generate_search_variants():
+    """Generate search variants for models that support content generation."""
+    search_models = []
+    for model in BASE_MODELS:
+        # Only add search variants for models that support content generation
+        if "generateContent" in model["supportedGenerationMethods"]:
+            search_variant = model.copy()
+            search_variant["name"] = model["name"] + "-search"
+            search_variant["displayName"] = model["displayName"] + " with Google Search"
+            search_variant["description"] = model["description"] + " (includes Google Search grounding)"
+            search_models.append(search_variant)
+    return search_models
+
+# Supported Models (includes both base models and search variants)
+SUPPORTED_MODELS = BASE_MODELS + _generate_search_variants()
+
+# Helper function to get base model name from search variant
+def get_base_model_name(model_name):
+    """Convert search variant model name to base model name."""
+    if model_name.endswith("-search"):
+        return model_name[:-7]  # Remove "-search" suffix
+    return model_name
+
+# Helper function to check if model uses search grounding
+def is_search_model(model_name):
+    """Check if model name indicates search grounding should be enabled."""
+    return model_name.endswith("-search")
