@@ -8,7 +8,13 @@ import uuid
 from typing import Dict, Any
 
 from .models import OpenAIChatCompletionRequest, OpenAIChatCompletionResponse
-from .config import DEFAULT_SAFETY_SETTINGS, is_search_model, get_base_model_name
+from .config import (
+    DEFAULT_SAFETY_SETTINGS,
+    is_search_model,
+    get_base_model_name,
+    get_thinking_budget,
+    should_include_thoughts
+)
 
 
 def openai_request_to_gemini(openai_request: OpenAIChatCompletionRequest) -> Dict[str, Any]:
@@ -103,6 +109,14 @@ def openai_request_to_gemini(openai_request: OpenAIChatCompletionRequest) -> Dic
     if is_search_model(openai_request.model):
         request_payload["tools"] = [{"googleSearch": {}}]
     
+    # Add thinking configuration for thinking models
+    thinking_budget = get_thinking_budget(openai_request.model)
+    if thinking_budget is not None:
+        request_payload["generationConfig"]["thinkingConfig"] = {
+            "thinkingBudget": thinking_budget,
+            "includeThoughts": should_include_thoughts(openai_request.model)
+        }
+    
     return request_payload
 
 
@@ -126,18 +140,34 @@ def gemini_response_to_openai(gemini_response: Dict[str, Any], model: str) -> Di
         if role == "model":
             role = "assistant"
         
-        # Extract text content from parts
+        # Extract and separate thinking tokens from regular content
         parts = candidate.get("content", {}).get("parts", [])
         content = ""
-        if parts and len(parts) > 0:
-            content = parts[0].get("text", "")
+        reasoning_content = ""
+        
+        for part in parts:
+            if not part.get("text"):
+                continue
+            
+            # Check if this part contains thinking tokens
+            if part.get("thought", False):
+                reasoning_content += part.get("text", "")
+            else:
+                content += part.get("text", "")
+        
+        # Build message object
+        message = {
+            "role": role,
+            "content": content,
+        }
+        
+        # Add reasoning_content if there are thinking tokens
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
         
         choices.append({
             "index": candidate.get("index", 0),
-            "message": {
-                "role": role,
-                "content": content,
-            },
+            "message": message,
             "finish_reason": _map_finish_reason(candidate.get("finishReason")),
         })
     
@@ -171,17 +201,31 @@ def gemini_stream_chunk_to_openai(gemini_chunk: Dict[str, Any], model: str, resp
         if role == "model":
             role = "assistant"
         
-        # Extract text content from parts
+        # Extract and separate thinking tokens from regular content
         parts = candidate.get("content", {}).get("parts", [])
         content = ""
-        if parts and len(parts) > 0:
-            content = parts[0].get("text", "")
+        reasoning_content = ""
+        
+        for part in parts:
+            if not part.get("text"):
+                continue
+            
+            # Check if this part contains thinking tokens
+            if part.get("thought", False):
+                reasoning_content += part.get("text", "")
+            else:
+                content += part.get("text", "")
+        
+        # Build delta object
+        delta = {}
+        if content:
+            delta["content"] = content
+        if reasoning_content:
+            delta["reasoning_content"] = reasoning_content
         
         choices.append({
             "index": candidate.get("index", 0),
-            "delta": {
-                "content": content,
-            },
+            "delta": delta,
             "finish_reason": _map_finish_reason(candidate.get("finishReason")),
         })
     

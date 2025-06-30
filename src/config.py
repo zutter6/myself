@@ -131,17 +131,110 @@ def _generate_search_variants():
             search_models.append(search_variant)
     return search_models
 
-# Supported Models (includes both base models and search variants)
-SUPPORTED_MODELS = BASE_MODELS + _generate_search_variants()
+# Generate thinking variants for applicable models
+def _generate_thinking_variants():
+    """Generate nothinking and maxthinking variants for models that support thinking."""
+    thinking_models = []
+    for model in BASE_MODELS:
+        # Only add thinking variants for models that support content generation
+        # and contain "gemini-2.5-flash" or "gemini-2.5-pro" in their name
+        if ("generateContent" in model["supportedGenerationMethods"] and
+            ("gemini-2.5-flash" in model["name"] or "gemini-2.5-pro" in model["name"])):
+            
+            # Add -nothinking variant
+            nothinking_variant = model.copy()
+            nothinking_variant["name"] = model["name"] + "-nothinking"
+            nothinking_variant["displayName"] = model["displayName"] + " (No Thinking)"
+            nothinking_variant["description"] = model["description"] + " (thinking disabled)"
+            thinking_models.append(nothinking_variant)
+            
+            # Add -maxthinking variant
+            maxthinking_variant = model.copy()
+            maxthinking_variant["name"] = model["name"] + "-maxthinking"
+            maxthinking_variant["displayName"] = model["displayName"] + " (Max Thinking)"
+            maxthinking_variant["description"] = model["description"] + " (maximum thinking budget)"
+            thinking_models.append(maxthinking_variant)
+    return thinking_models
 
-# Helper function to get base model name from search variant
+# Generate combined variants (search + thinking combinations)
+def _generate_combined_variants():
+    """Generate combined search and thinking variants."""
+    combined_models = []
+    for model in BASE_MODELS:
+        # Only add combined variants for models that support content generation
+        # and contain "gemini-2.5-flash" or "gemini-2.5-pro" in their name
+        if ("generateContent" in model["supportedGenerationMethods"] and
+            ("gemini-2.5-flash" in model["name"] or "gemini-2.5-pro" in model["name"])):
+            
+            # search + nothinking
+            search_nothinking = model.copy()
+            search_nothinking["name"] = model["name"] + "-search-nothinking"
+            search_nothinking["displayName"] = model["displayName"] + " with Google Search (No Thinking)"
+            search_nothinking["description"] = model["description"] + " (includes Google Search grounding, thinking disabled)"
+            combined_models.append(search_nothinking)
+            
+            # search + maxthinking
+            search_maxthinking = model.copy()
+            search_maxthinking["name"] = model["name"] + "-search-maxthinking"
+            search_maxthinking["displayName"] = model["displayName"] + " with Google Search (Max Thinking)"
+            search_maxthinking["description"] = model["description"] + " (includes Google Search grounding, maximum thinking budget)"
+            combined_models.append(search_maxthinking)
+    return combined_models
+
+# Supported Models (includes base models, search variants, and thinking variants)
+SUPPORTED_MODELS = BASE_MODELS + _generate_search_variants() + _generate_thinking_variants()
+
+# Helper function to get base model name from any variant
 def get_base_model_name(model_name):
-    """Convert search variant model name to base model name."""
-    if model_name.endswith("-search"):
-        return model_name[:-7]  # Remove "-search" suffix
+    """Convert variant model name to base model name."""
+    # Remove all possible suffixes in order
+    suffixes = ["-maxthinking", "-nothinking", "-search"]
+    for suffix in suffixes:
+        if model_name.endswith(suffix):
+            return model_name[:-len(suffix)]
     return model_name
 
 # Helper function to check if model uses search grounding
 def is_search_model(model_name):
     """Check if model name indicates search grounding should be enabled."""
-    return model_name.endswith("-search")
+    return "-search" in model_name
+
+# Helper function to check if model uses no thinking
+def is_nothinking_model(model_name):
+    """Check if model name indicates thinking should be disabled."""
+    return "-nothinking" in model_name
+
+# Helper function to check if model uses max thinking
+def is_maxthinking_model(model_name):
+    """Check if model name indicates maximum thinking budget should be used."""
+    return "-maxthinking" in model_name
+
+# Helper function to get thinking budget for a model
+def get_thinking_budget(model_name):
+    """Get the appropriate thinking budget for a model based on its name and variant."""
+    base_model = get_base_model_name(model_name)
+    
+    if is_nothinking_model(model_name):
+        if "gemini-2.5-flash" in base_model:
+            return 0  # No thinking for flash
+        elif "gemini-2.5-pro" in base_model:
+            return 128  # Limited thinking for pro
+    elif is_maxthinking_model(model_name):
+        if "gemini-2.5-flash" in base_model:
+            return 24576
+        elif "gemini-2.5-pro" in base_model:
+            return 32768
+    else:
+        # Default thinking budget for regular models
+        return -1  # Default for all models
+
+# Helper function to check if thinking should be included in output
+def should_include_thoughts(model_name):
+    """Check if thoughts should be included in the response."""
+    if is_nothinking_model(model_name):
+        # For nothinking mode, still include thoughts if it's a pro model
+        base_model = get_base_model_name(model_name)
+        return "gemini-2.5-pro" in base_model
+    else:
+        # For all other modes, include thoughts
+        return True

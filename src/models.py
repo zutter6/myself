@@ -5,6 +5,7 @@ from typing import List, Optional, Union, Dict, Any
 class OpenAIChatMessage(BaseModel):
     role: str
     content: Union[str, List[Dict[str, Any]]]
+    reasoning_content: Optional[str] = None
 
 class OpenAIChatCompletionRequest(BaseModel):
     model: str
@@ -37,6 +38,7 @@ class OpenAIChatCompletionResponse(BaseModel):
 
 class OpenAIDelta(BaseModel):
     content: Optional[str] = None
+    reasoning_content: Optional[str] = None
 
 class OpenAIChatCompletionStreamChoice(BaseModel):
     index: int
