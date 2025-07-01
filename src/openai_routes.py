@@ -69,7 +69,7 @@ async def openai_chat_completions(
                     
                     async for chunk in response.body_iterator:
                         if isinstance(chunk, bytes):
-                            chunk = chunk.decode('utf-8')
+                            chunk = chunk.decode('utf-8', "ignore")
                         
                         if chunk.startswith('data: '):
                             try:
@@ -124,7 +124,7 @@ async def openai_chat_completions(
                             # Try to parse error response
                             error_body = response.body
                             if isinstance(error_body, bytes):
-                                error_body = error_body.decode('utf-8')
+                                error_body = error_body.decode('utf-8', "ignore")
                             error_data = json.loads(error_body)
                             if "error" in error_data:
                                 error_msg = error_data["error"].get("message", error_msg)
@@ -171,7 +171,7 @@ async def openai_chat_completions(
                     # Try to parse the error response and transform to OpenAI format
                     error_body = response.body
                     if isinstance(error_body, bytes):
-                        error_body = error_body.decode('utf-8')
+                        error_body = error_body.decode('utf-8', "ignore")
                     
                     error_data = json.loads(error_body)
                     if "error" in error_data:
