@@ -67,7 +67,7 @@ def authenticate_user(request: Request):
     if auth_header.startswith("Basic "):
         try:
             encoded_credentials = auth_header[6:]
-            decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
+            decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8', "ignore")
             username, password = decoded_credentials.split(':', 1)
             if password == GEMINI_AUTH_PASSWORD:
                 return username
