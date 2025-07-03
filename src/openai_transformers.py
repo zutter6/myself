@@ -96,6 +96,8 @@ def openai_request_to_gemini(openai_request: OpenAIChatCompletionRequest) -> Dic
         # Handle JSON mode if specified
         if openai_request.response_format.get("type") == "json_object":
             generation_config["responseMimeType"] = "application/json"
+    
+    generation_config["enableEnhancedCivicAnswers"] = False
 
     # Build the request payload
     request_payload = {

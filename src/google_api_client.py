@@ -310,6 +310,8 @@ def build_gemini_payload_from_native(native_request: dict, model_from_path: str)
     
     if "generationConfig" not in native_request:
         native_request["generationConfig"] = {}
+        
+    # native_request["enableEnhancedCivicAnswers"] = False
     
     if "thinkingConfig" not in native_request["generationConfig"]:
         native_request["generationConfig"]["thinkingConfig"] = {}
