@@ -1,5 +1,4 @@
 name: GHCR CI
-permissions: write-all
 on:
   push:
     branches: [ "main" ]
@@ -10,6 +9,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:         
+      contents: read
+      packages: write
 
     steps:
     - name: lowercase repository name
